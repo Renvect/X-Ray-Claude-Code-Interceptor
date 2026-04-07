@@ -2,6 +2,12 @@
 
 X-Ray Claude Code Interceptor is an advanced tooling and diagnostic proxy designed to seamlessly intercept, analyze, and optimize traffic between [Claude Code](https://github.com/anthropics/claude-code) and the Anthropic API. 
 
+
+Refference discussion to find more and suggestions by others pointing with good info: 
+
+https://github.com/anthropics/claude-code/issues/40524#issuecomment-4199222361
+
+
 ## 🎯 Purpose
 
 This tool was specifically built to figure out **what is causing spikes in token usage and burning up limits**. By standing between the Claude CLI and the Anthropic endpoints, it provides full transparency into the payloads being shuttled back and forth. 
