@@ -1,0 +1,2601 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>XRAY — Cargo Monitor</title>
+<style>
+:root {
+  --bg:       #0d1117;
+  --surface:  #161b22;
+  --border:   #21262d;
+  --border2:  #30363d;
+  --cyan:     #00d4ff;
+  --amber:    #f0a500;
+  --green:    #00ff88;
+  --red:      #ff4444;
+  --dim:      #8b949e;
+  --text:     #c9d1d9;
+  --bright:   #e6edf3;
+  --font:     'Consolas', 'Courier New', 'Lucida Console', monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow: hidden;
+}
+
+/* ── SCAN LINE ─────────────────────────────────────── */
+body::after {
+  content: '';
+  position: fixed; inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0,0,0,.03) 2px,
+    rgba(0,0,0,.03) 4px
+  );
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* ── LAYOUT ────────────────────────────────────────── */
+#root {
+  display: grid;
+  grid-template-rows: 44px 32px 1fr 28px;
+  height: 100vh;
+}
+
+/* ── HEADER ────────────────────────────────────────── */
+#header {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 0 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  transition: box-shadow .2s;
+  overflow: hidden;
+}
+#header.flash {
+  box-shadow: 0 0 20px rgba(240,165,0,.35), inset 0 -1px 0 var(--amber);
+}
+
+.h-title {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: .12em;
+  color: var(--bright);
+  text-transform: uppercase;
+  margin-right: 20px;
+  white-space: nowrap;
+}
+.h-title span { color: var(--cyan); }
+
+.dot {
+  display: inline-block;
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--dim);
+  margin-right: 10px;
+  flex-shrink: 0;
+  transition: background .3s;
+}
+.dot.live {
+  background: var(--green);
+  box-shadow: 0 0 6px var(--green);
+  animation: pulse 2s infinite;
+}
+@keyframes pulse {
+  0%,100% { opacity: 1; }
+  50%      { opacity: .4; }
+}
+
+.h-sep { width: 1px; height: 20px; background: var(--border2); margin: 0 14px; flex-shrink: 0; }
+
+.h-field { display: flex; flex-direction: column; gap: 1px; flex-shrink: 0; }
+.h-label { font-size: 9px; text-transform: uppercase; letter-spacing: .1em; color: var(--dim); }
+.h-value { font-size: 12px; color: var(--cyan); white-space: nowrap; }
+
+#h-session { min-width: 60px; }
+#h-turn .h-value { color: var(--amber); }
+#h-model .h-value { color: var(--text); font-size: 11px; }
+
+.h-tokens { display: flex; flex-direction: column; gap: 2px; margin-left: auto; align-items: flex-end; }
+.h-tokens-num {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--bright);
+  letter-spacing: .04em;
+  transition: color .3s;
+}
+.h-tokens-delta {
+  font-size: 10px;
+  color: var(--dim);
+  text-align: right;
+}
+.h-tokens-delta.up { color: var(--amber); }
+
+#sparkline-canvas { margin-left: 14px; }
+
+/* ── CONTROLS BAR ──────────────────────────────────── */
+#controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+/* ── BODY ──────────────────────────────────────────── */
+#body {
+  display: grid;
+  grid-template-columns: 340px 1fr;
+  overflow: hidden;
+}
+
+/* ── LEFT PANEL ────────────────────────────────────── */
+#left {
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.panel {
+  border-bottom: 1px solid var(--border);
+  padding: 10px 12px;
+}
+.panel:last-child { border-bottom: none; flex: 1; overflow: hidden; }
+
+.panel-title {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: .14em;
+  color: var(--dim);
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.panel-title::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+/* ── CARGO BREAKDOWN ───────────────────────────────── */
+#breakdown-bar {
+  height: 20px;
+  display: flex;
+  border-radius: 2px;
+  overflow: hidden;
+  margin-bottom: 8px;
+  background: var(--border);
+}
+.bar-seg {
+  height: 100%;
+  transition: width .5s cubic-bezier(.4,0,.2,1);
+  min-width: 0;
+}
+.bar-seg.system  { background: #3d6acc; }
+.bar-seg.tools   { background: #7c3aed; }
+.bar-seg.results { background: var(--amber); }
+.bar-seg.text    { background: #2ea043; }
+
+#breakdown-legend {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 12px;
+}
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+}
+.legend-dot {
+  width: 8px; height: 8px;
+  border-radius: 1px;
+  flex-shrink: 0;
+}
+.legend-dot.system  { background: #3d6acc; }
+.legend-dot.tools   { background: #7c3aed; }
+.legend-dot.results { background: var(--amber); }
+.legend-dot.text    { background: #2ea043; }
+.legend-name { color: var(--dim); flex: 1; }
+.legend-val  { color: var(--cyan); text-align: right; min-width: 50px; }
+
+/* ── TOP CARGO ─────────────────────────────────────── */
+#left .panel:last-child {
+  overflow-y: auto;
+  flex: 1;
+}
+
+#cargo-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+#cargo-table th {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  color: var(--dim);
+  text-align: left;
+  padding: 0 4px 6px;
+  border-bottom: 1px solid var(--border);
+  font-weight: normal;
+}
+#cargo-table th:last-child,
+#cargo-table th:nth-child(3) { text-align: right; }
+
+.cargo-row td {
+  padding: 5px 4px;
+  border-bottom: 1px solid rgba(33,38,45,.6);
+  vertical-align: middle;
+}
+.cargo-row:hover { background: rgba(255,255,255,.02); }
+
+.cargo-name {
+  font-size: 11px;
+  color: var(--text);
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cargo-name .mcp-star { color: var(--amber); margin-left: 2px; }
+
+.cargo-bar-cell { width: 80px; padding: 5px 6px; }
+.cargo-bar-track {
+  height: 6px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.cargo-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width .5s cubic-bezier(.4,0,.2,1);
+  background: var(--cyan);
+}
+.cargo-bar-fill.heavy { background: var(--amber); }
+.cargo-bar-fill.mcp   { background: #f0a500; }
+
+.cargo-count { color: var(--dim); text-align: right; min-width: 24px; }
+.cargo-tok   { color: var(--cyan); text-align: right; min-width: 52px; }
+.cargo-tok.heavy { color: var(--amber); }
+
+/* ── RIGHT PANEL — TURN FEED ───────────────────────── */
+#right {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+#feed-header {
+  padding: 10px 14px 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+#feed-header .panel-title { margin-bottom: 0; }
+
+#turn-feed {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 14px 4px;
+}
+#turn-feed::-webkit-scrollbar { width: 4px; }
+#turn-feed::-webkit-scrollbar-track { background: transparent; }
+#turn-feed::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+
+.turn-row {
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  margin-bottom: 5px;
+  background: var(--surface);
+  cursor: pointer;
+  transition: border-color .2s, background .2s;
+  animation: slideIn .25s ease;
+}
+@keyframes slideIn {
+  from { opacity: 0; transform: translateX(12px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+.turn-row:hover { border-color: var(--border2); background: #1c2129; }
+.turn-row.expanded { border-color: var(--border2); }
+.turn-row.new-flash { border-color: var(--amber); }
+
+.turn-summary {
+  display: flex;
+  align-items: center;
+  padding: 7px 10px;
+  gap: 0;
+  user-select: none;
+}
+
+.turn-num {
+  font-size: 11px;
+  color: var(--dim);
+  min-width: 32px;
+  flex-shrink: 0;
+}
+.turn-num strong { color: var(--amber); font-weight: normal; }
+
+.turn-time {
+  font-size: 10px;
+  color: var(--dim);
+  min-width: 68px;
+  flex-shrink: 0;
+}
+
+.turn-weight {
+  flex: 1;
+  margin: 0 10px;
+  height: 8px;
+  background: var(--border);
+  border-radius: 1px;
+  overflow: hidden;
+  position: relative;
+}
+.turn-weight-fill {
+  height: 100%;
+  border-radius: 1px;
+  transition: width .4s ease;
+}
+
+.turn-delta {
+  font-size: 11px;
+  min-width: 70px;
+  text-align: right;
+  flex-shrink: 0;
+}
+.turn-delta.pos { color: var(--amber); }
+.turn-delta.neg { color: var(--green); }
+
+.turn-total {
+  font-size: 11px;
+  color: var(--cyan);
+  min-width: 72px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.turn-chevron {
+  color: var(--dim);
+  margin-left: 10px;
+  font-size: 10px;
+  flex-shrink: 0;
+  transition: transform .2s;
+}
+.turn-row.expanded .turn-chevron { transform: rotate(90deg); }
+
+.turn-detail {
+  display: none;
+  border-top: 1px solid var(--border);
+  padding: 8px 10px;
+}
+.turn-row.expanded .turn-detail { display: block; }
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 20px;
+  margin-bottom: 8px;
+}
+.detail-kv { display: flex; justify-content: space-between; gap: 8px; }
+.detail-k  { color: var(--dim); font-size: 10px; }
+.detail-v  { color: var(--text); font-size: 10px; text-align: right; }
+.detail-v.cyan  { color: var(--cyan); }
+.detail-v.amber { color: var(--amber); }
+
+.detail-tools-title {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  color: var(--dim);
+  margin-bottom: 5px;
+  margin-top: 4px;
+}
+
+.detail-tool-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 3px;
+}
+.detail-tool-name {
+  font-size: 10px;
+  color: var(--text);
+  min-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.detail-tool-bar-track {
+  flex: 1;
+  height: 5px;
+  background: var(--border);
+  border-radius: 1px;
+  overflow: hidden;
+}
+.detail-tool-bar-fill {
+  height: 100%;
+  background: var(--cyan);
+  border-radius: 1px;
+}
+.detail-tool-bar-fill.heavy { background: var(--amber); }
+.detail-tool-tok {
+  font-size: 10px;
+  color: var(--cyan);
+  min-width: 50px;
+  text-align: right;
+}
+
+/* ── OVERHEAD SECTION ──────────────────────────────── */
+.detail-section-title {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: .12em;
+  color: var(--dim);
+  margin: 8px 0 5px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.detail-section-title .badge {
+  background: rgba(124,58,237,.25);
+  color: #a78bfa;
+  border: 1px solid rgba(124,58,237,.4);
+  border-radius: 2px;
+  padding: 1px 5px;
+  font-size: 9px;
+  letter-spacing: .06em;
+}
+.detail-section-title .badge.sys {
+  background: rgba(61,106,204,.25);
+  color: #7aa2f7;
+  border-color: rgba(61,106,204,.4);
+}
+.overhead-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 3px;
+}
+.overhead-name {
+  font-size: 10px;
+  color: var(--text);
+  min-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.overhead-name .mcp-tag {
+  color: var(--amber);
+  font-size: 9px;
+  margin-left: 3px;
+}
+.overhead-bar-track {
+  flex: 1;
+  height: 5px;
+  background: var(--border);
+  border-radius: 1px;
+  overflow: hidden;
+}
+.overhead-bar-fill {
+  height: 100%;
+  background: #7c3aed;
+  border-radius: 1px;
+  opacity: .7;
+}
+.overhead-bar-fill.mcp  { background: var(--amber); opacity: .8; }
+.overhead-bar-fill.sys  { background: #3d6acc; opacity: .8; }
+.overhead-tok {
+  font-size: 10px;
+  color: #a78bfa;
+  min-width: 50px;
+  text-align: right;
+}
+.overhead-tok.sys { color: #7aa2f7; }
+.overhead-pct {
+  font-size: 9px;
+  color: var(--dim);
+  min-width: 32px;
+  text-align: right;
+}
+.overhead-summary {
+  font-size: 10px;
+  color: var(--dim);
+  margin-top: 4px;
+  padding: 4px 6px;
+  background: rgba(255,255,255,.02);
+  border-radius: 2px;
+  display: flex;
+  gap: 16px;
+}
+.overhead-summary span { color: var(--text); }
+
+/* ── FOOTER ────────────────────────────────────────── */
+#footer {
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  gap: 0;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  font-size: 10px;
+  color: var(--dim);
+}
+.f-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 12px;
+  border-right: 1px solid var(--border);
+  height: 100%;
+}
+.f-item:first-child { padding-left: 0; }
+.f-label { text-transform: uppercase; letter-spacing: .08em; }
+.f-val   { color: var(--text); }
+.f-val.cyan  { color: var(--cyan); }
+.f-val.amber { color: var(--amber); }
+.f-val.green { color: var(--green); }
+
+#f-status { padding-right: 0; border-right: none; }
+
+#strip-btn {
+  background: rgba(255,68,68,.1);
+  border: 1px solid rgba(255,68,68,.35);
+  color: var(--dim);
+  font-family: var(--font);
+  font-size: 10px;
+  letter-spacing: .1em;
+  padding: 3px 10px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: background .2s, border-color .2s, color .2s;
+  text-transform: uppercase;
+}
+#strip-btn:hover {
+  background: rgba(255,68,68,.2);
+  border-color: rgba(255,68,68,.6);
+  color: var(--text);
+}
+#strip-btn.active {
+  background: rgba(0,255,136,.12);
+  border-color: rgba(0,255,136,.5);
+  color: var(--green);
+}
+#strip-btn.active:hover {
+  background: rgba(0,255,136,.2);
+}
+.f-status-text { letter-spacing: .06em; }
+.f-status-text.live { color: var(--green); }
+.f-status-text.dead { color: var(--dim); }
+
+/* ── EMPTY STATE ───────────────────────────────────── */
+#empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 10px;
+  color: var(--dim);
+}
+.empty-icon {
+  font-size: 32px;
+  opacity: .3;
+  animation: blink 2s step-end infinite;
+}
+@keyframes blink { 50% { opacity: .1; } }
+.empty-msg { font-size: 11px; text-align: center; line-height: 1.8; }
+.empty-cmd { font-size: 10px; color: var(--cyan); background: var(--border); padding: 4px 10px; border-radius: 2px; }
+
+/* ── SYSTEM INSPECTOR MODAL ────────────────────────────────── */
+#sys-modal-backdrop {
+  display: none;
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,.72);
+  z-index: 1000;
+  backdrop-filter: blur(2px);
+}
+#sys-modal-backdrop.open { display: flex; align-items: flex-start; justify-content: center; padding: 32px 24px; }
+#sys-modal {
+  background: var(--surface);
+  border: 1px solid var(--border2);
+  border-radius: 4px;
+  width: 100%;
+  max-width: 880px;
+  max-height: calc(100vh - 64px);
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 24px 64px rgba(0,0,0,.6);
+}
+#sys-modal-header {
+  display: flex; align-items: center; padding: 12px 16px;
+  border-bottom: 1px solid var(--border); gap: 12px; flex-shrink: 0;
+}
+#sys-modal-header .title { font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: #7aa2f7; }
+#sys-modal-header .subtitle { font-size: 10px; color: var(--dim); flex: 1; }
+#sys-modal-close {
+  background: none; border: none; color: var(--dim); cursor: pointer;
+  font-size: 16px; line-height: 1; padding: 2px 6px; border-radius: 2px; font-family: var(--font);
+}
+#sys-modal-close:hover { color: var(--text); background: var(--border); }
+#sys-modal-body { overflow-y: auto; padding: 12px 16px; flex: 1; }
+
+.sys-block-card { border: 1px solid var(--border); border-radius: 3px; margin-bottom: 12px; overflow: hidden; }
+.sys-block-header {
+  display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+  background: rgba(61,106,204,.08); border-bottom: 1px solid var(--border);
+  cursor: pointer; user-select: none;
+}
+.sys-block-header:hover { background: rgba(61,106,204,.14); }
+.sys-block-num { font-size: 9px; color: #7aa2f7; min-width: 44px; letter-spacing: .08em; }
+.sys-block-label { font-size: 11px; color: var(--bright); flex: 1; }
+.sys-block-meta { display: flex; gap: 12px; align-items: center; }
+.sys-block-meta .tok { font-size: 10px; color: #7aa2f7; }
+.sys-block-meta .cached-badge {
+  font-size: 9px; padding: 1px 6px; border-radius: 2px;
+  background: rgba(0,255,136,.12); color: var(--green); border: 1px solid rgba(0,255,136,.3); letter-spacing: .06em;
+}
+.sys-block-meta .lines { font-size: 9px; color: var(--dim); }
+.sys-block-chevron { color: var(--dim); font-size: 9px; transition: transform .15s; flex-shrink: 0; }
+.sys-block-card.open .sys-block-chevron { transform: rotate(90deg); }
+.sys-block-content { display: none; padding: 10px 12px; }
+.sys-block-card.open .sys-block-content { display: block; }
+.sys-block-stats { display: flex; gap: 16px; margin-bottom: 8px; font-size: 9px; color: var(--dim); }
+.sys-block-stats span { color: var(--text); }
+.sys-block-toc { margin-bottom: 8px; padding: 6px 10px; background: rgba(255,255,255,.02); border-radius: 2px; border-left: 2px solid #3d6acc; }
+.sys-block-toc-title { font-size: 9px; color: var(--dim); text-transform: uppercase; letter-spacing: .1em; margin-bottom: 4px; }
+.sys-block-toc ul { padding-left: 14px; margin: 0; }
+.sys-block-toc li { font-size: 10px; color: var(--text); margin-bottom: 2px; }
+.sys-block-bar-track { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin-bottom: 8px; }
+.sys-block-bar-fill { height: 100%; background: #3d6acc; border-radius: 2px; }
+.sys-preview {
+  font-family: var(--font); font-size: 10px; color: var(--text);
+  white-space: pre-wrap; word-break: break-word; line-height: 1.6;
+  max-height: 300px; overflow-y: auto;
+  background: rgba(0,0,0,.25); border: 1px solid var(--border); border-radius: 2px; padding: 8px 10px;
+}
+.sys-full-btn {
+  margin-top: 6px; background: none; border: 1px solid var(--border2);
+  color: var(--dim); font-family: var(--font); font-size: 9px;
+  letter-spacing: .08em; padding: 3px 10px; border-radius: 2px; cursor: pointer; text-transform: uppercase;
+}
+.sys-full-btn:hover { color: var(--text); border-color: #7aa2f7; }
+
+/* ── SYSTEM SUMMARY STRIP ──────────────────────────── */
+.sys-summary {
+  padding: 10px 12px; margin-bottom: 12px;
+  background: rgba(0,0,0,.25); border: 1px solid var(--border); border-radius: 3px;
+}
+.sys-summary-title { font-size: 9px; color: var(--dim); text-transform: uppercase; letter-spacing: .12em; margin-bottom: 8px; }
+.sys-summary-bars { display: flex; gap: 10px; align-items: center; margin-bottom: 6px; }
+.sys-summary-bar { flex: 1; height: 8px; background: var(--border); border-radius: 2px; overflow: hidden; display: flex; }
+.sys-sum-fill-fixed { background: #e53935; height: 100%; }
+.sys-sum-fill-dynamic { background: #43a047; height: 100%; }
+.sys-summary-labels { display: flex; gap: 16px; font-size: 10px; flex-wrap: wrap; }
+.sys-summary-labels .lbl { display: flex; align-items: center; gap: 5px; }
+.sys-summary-labels .dot-fixed { width: 7px; height: 7px; background: #e53935; border-radius: 1px; }
+.sys-summary-labels .dot-dyn { width: 7px; height: 7px; background: #43a047; border-radius: 1px; }
+.sys-cross-turn { margin-top: 8px; font-size: 9px; color: var(--dim); border-top: 1px solid var(--border); padding-top: 6px; }
+.sys-cross-turn span { color: var(--text); }
+.sys-cross-turn .hit { color: var(--green); }
+.sys-cross-turn .miss { color: var(--amber); }
+
+/* ── SECTION TABLE ─────────────────────────────────── */
+.section-table { width: 100%; margin-top: 8px; border-top: 1px solid var(--border); padding-top: 6px; }
+.section-table-title { font-size: 9px; text-transform: uppercase; letter-spacing: .12em; color: var(--dim); margin-bottom: 6px; }
+.section-row { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; padding: 2px 0; }
+.section-row:hover { background: rgba(255,255,255,.02); }
+.section-depth { width: 10px; text-align: right; font-size: 8px; color: var(--dim); flex-shrink: 0; }
+.section-name { font-size: 10px; color: var(--text); min-width: 160px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; }
+.section-bar-track { flex: 1; height: 5px; background: var(--border); border-radius: 1px; overflow: hidden; }
+.section-bar-fill { height: 100%; border-radius: 1px; }
+.section-bar-fill.core { background: #e53935; opacity: .7; }
+.section-bar-fill.env { background: var(--amber); opacity: .7; }
+.section-bar-fill.user { background: #43a047; opacity: .7; }
+.section-bar-fill.unknown { background: var(--dim); opacity: .5; }
+.section-tok { font-size: 10px; min-width: 50px; text-align: right; flex-shrink: 0; }
+.section-tok.core { color: #ef5350; }
+.section-tok.env { color: var(--amber); }
+.section-tok.user { color: #66bb6a; }
+.section-tok.unknown { color: var(--dim); }
+.section-badge {
+  font-size: 8px; padding: 1px 5px; border-radius: 2px;
+  letter-spacing: .06em; text-transform: uppercase; flex-shrink: 0; min-width: 40px; text-align: center;
+}
+.section-badge.core { background: rgba(229,57,53,.15); color: #ef5350; border: 1px solid rgba(229,57,53,.3); }
+.section-badge.env { background: rgba(240,165,0,.12); color: var(--amber); border: 1px solid rgba(240,165,0,.3); }
+.section-badge.user { background: rgba(67,160,71,.15); color: #66bb6a; border: 1px solid rgba(67,160,71,.3); }
+.section-badge.unknown { background: rgba(139,148,158,.1); color: var(--dim); border: 1px solid rgba(139,148,158,.2); }
+.section-fn { font-size: 8px; color: var(--dim); min-width: 44px; flex-shrink: 0; font-style: italic; }
+
+/* ── SCROLLBAR global ──────────────────────────────── */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+
+/* ── LEFT TABS (Sessions / Cargo / Package) ────────── */
+.left-tabs {
+  display: flex;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.tab-btn {
+  flex: 1;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--dim);
+  font-family: var(--font);
+  font-size: 9px;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  padding: 8px 4px;
+  cursor: pointer;
+  transition: color .15s, border-color .15s;
+}
+.tab-btn:hover { color: var(--text); }
+.tab-btn.active { color: var(--cyan); border-bottom-color: var(--cyan); }
+.tab-pane { display: none; flex: 1; flex-direction: column; overflow: hidden; }
+.tab-pane.active { display: flex; }
+
+/* ── SESSIONS TAB ──────────────────────────────────── */
+#sessions-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 8px;
+}
+.session-row {
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  margin-bottom: 4px;
+  cursor: pointer;
+  background: var(--surface);
+  transition: border-color .15s, background .15s;
+}
+.session-row:hover { border-color: var(--border2); background: #1c2129; }
+.session-row.active-session { border-color: rgba(0,255,136,.35); }
+.session-row.viewing { border-color: var(--cyan); background: rgba(0,212,255,.05); }
+.session-row-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 3px;
+}
+.session-date { font-size: 10px; color: var(--amber); flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.session-live-badge {
+  font-size: 8px;
+  padding: 1px 6px;
+  border-radius: 2px;
+  background: rgba(0,255,136,.15);
+  color: var(--green);
+  border: 1px solid rgba(0,255,136,.4);
+  letter-spacing: .06em;
+  animation: pulse 2s infinite;
+}
+.session-hist-badge {
+  font-size: 8px;
+  padding: 1px 6px;
+  border-radius: 2px;
+  background: rgba(0,212,255,.12);
+  color: var(--cyan);
+  border: 1px solid rgba(0,212,255,.3);
+  letter-spacing: .06em;
+}
+.session-row-stats {
+  display: flex;
+  gap: 10px;
+  font-size: 9px;
+  color: var(--dim);
+}
+.session-row-stats span { color: var(--text); }
+.sessions-loading { font-size: 9px; color: var(--dim); padding: 8px; text-align: center; }
+
+/* ── HISTORICAL MODE BANNER ────────────────────────── */
+#hist-banner {
+  display: none;
+  background: rgba(0,212,255,.08);
+  border-bottom: 1px solid rgba(0,212,255,.25);
+  padding: 4px 12px;
+  font-size: 9px;
+  color: var(--cyan);
+  letter-spacing: .08em;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+}
+#hist-banner.visible { display: flex; }
+#hist-banner-btn {
+  margin-left: auto;
+  background: none;
+  border: 1px solid rgba(0,212,255,.35);
+  color: var(--cyan);
+  font-family: var(--font);
+  font-size: 9px;
+  padding: 2px 8px;
+  border-radius: 2px;
+  cursor: pointer;
+}
+#hist-banner-btn:hover { background: rgba(0,212,255,.1); }
+
+/* ── RESTORE BANNER ────────────────────────────────── */
+#restore-banner {
+  display: none;
+  background: rgba(0,255,136,.06);
+  border-bottom: 1px solid rgba(0,255,136,.2);
+  padding: 3px 12px;
+  font-size: 9px;
+  color: var(--green);
+  letter-spacing: .06em;
+  flex-shrink: 0;
+}
+#restore-banner.visible { display: block; }
+
+/* ── WAGON DELTA SECTION ───────────────────────────── */
+.wagon-delta-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 4px;
+}
+.wagon-stat { font-size: 10px; color: var(--dim); }
+.wagon-stat strong { color: var(--cyan); }
+.npm-flag-box {
+  background: rgba(240,165,0,.1);
+  border: 1px solid rgba(240,165,0,.35);
+  border-radius: 2px;
+  padding: 3px 8px;
+  font-size: 10px;
+  color: var(--amber);
+  margin-bottom: 4px;
+  word-break: break-all;
+}
+.npm-flag-label {
+  font-size: 8px;
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  color: var(--dim);
+  margin-right: 6px;
+}
+.heaviest-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 2px;
+  font-size: 9px;
+  align-items: center;
+}
+.heaviest-idx  { color: var(--dim); min-width: 26px; }
+.heaviest-role { color: var(--text); min-width: 60px; }
+.heaviest-tok  { color: var(--cyan); min-width: 52px; text-align: right; }
+.heaviest-type { color: var(--dim); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── PACKAGE TAB ───────────────────────────────────── */
+#pkg-tab-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+.pkg-section { margin-bottom: 10px; }
+.pkg-section-title {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: .12em;
+  color: var(--dim);
+  margin-bottom: 5px;
+  padding-bottom: 3px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.pkg-section-title .count-badge {
+  background: rgba(124,58,237,.2);
+  color: #a78bfa;
+  border-radius: 2px;
+  padding: 0 5px;
+  font-size: 8px;
+}
+.pkg-kv { display: flex; gap: 6px; margin-bottom: 2px; font-size: 10px; flex-wrap: wrap; }
+.pkg-k { color: var(--dim); flex-shrink: 0; }
+.pkg-v { color: var(--text); word-break: break-all; }
+.pkg-v.highlight { color: var(--cyan); }
+.pkg-v.amber { color: var(--amber); }
+.pkg-v.red   { color: var(--red); }
+.pkg-v.green { color: var(--green); }
+.pkg-argv    { font-size: 10px; color: var(--cyan); word-break: break-all; margin-bottom: 4px; padding: 3px 6px; background: rgba(0,0,0,.2); border-radius: 2px; }
+.pkg-error-box {
+  border: 1px solid rgba(255,68,68,.35);
+  background: rgba(255,68,68,.06);
+  border-radius: 2px;
+  padding: 5px 8px;
+  margin-bottom: 4px;
+  font-size: 10px;
+  color: var(--red);
+}
+.pkg-error-box .pkg-error-ts  { font-size: 9px; color: var(--dim); margin-bottom: 2px; }
+.pkg-error-box .pkg-error-msg { word-break: break-word; }
+.pkg-error-box .pkg-error-stack { font-size: 9px; color: var(--dim); margin-top: 3px; white-space: pre-wrap; max-height: 80px; overflow-y: auto; }
+.pkg-burst-box {
+  border: 1px solid rgba(255,68,68,.4);
+  background: rgba(255,68,68,.08);
+  border-radius: 2px;
+  padding: 4px 8px;
+  margin-bottom: 4px;
+  font-size: 10px;
+  color: var(--red);
+}
+.pkg-req-row { font-size: 10px; margin-bottom: 3px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.pkg-req-row .endpoint { color: var(--cyan); flex: 1; min-width: 100px; }
+.pkg-req-row .model    { color: var(--dim); }
+.pkg-req-row .msgcount { color: var(--amber); }
+.pkg-req-row .toolcount { color: #a78bfa; }
+.pkg-req-row .compaction { color: var(--green); font-size: 9px; }
+.pkg-req-row .burst    { color: var(--red); font-size: 9px; }
+.pkg-req-row .ts       { color: var(--dim); font-size: 9px; }
+.pkg-compaction-box {
+  border: 1px solid rgba(0,255,136,.3);
+  background: rgba(0,255,136,.06);
+  border-radius: 2px;
+  padding: 4px 8px;
+  margin-bottom: 4px;
+  font-size: 10px;
+  color: var(--green);
+}
+.pkg-no-data { font-size: 10px; color: var(--dim); padding: 6px 0; font-style: italic; }
+</style>
+</head>
+<body>
+<!-- ── SYSTEM INSPECTOR MODAL ── -->
+<div id="sys-modal-backdrop" onclick="if(event.target===this)closeSysModal()">
+  <div id="sys-modal">
+    <div id="sys-modal-header">
+      <span class="title">System Prompt Inspector</span>
+      <span class="subtitle" id="sys-modal-subtitle">loading…</span>
+      <button id="sys-modal-close" onclick="closeSysModal()">✕</button>
+    </div>
+    <div id="sys-modal-body">Loading…</div>
+  </div>
+</div>
+
+<div id="root">
+
+  <!-- ── HEADER ── -->
+  <header id="header">
+    <span class="dot" id="conn-dot"></span>
+    <span class="h-title">X<span>RAY</span> PROXY</span>
+
+    <div class="h-sep"></div>
+
+    <div class="h-field" id="h-session">
+      <span class="h-label">session</span>
+      <span class="h-value" id="val-session">—</span>
+    </div>
+
+    <div class="h-sep"></div>
+
+    <div class="h-field" id="h-turn">
+      <span class="h-label">turn</span>
+      <span class="h-value" id="val-turn">0</span>
+    </div>
+
+    <div class="h-sep"></div>
+
+    <div class="h-field" id="h-model">
+      <span class="h-label">model</span>
+      <span class="h-value" id="val-model">—</span>
+    </div>
+
+    <div class="h-sep"></div>
+
+    <div class="h-field">
+      <span class="h-label">messages</span>
+      <span class="h-value" id="val-msgs">—</span>
+    </div>
+
+    <div class="h-field h-tokens" style="margin-left:auto">
+      <span class="h-tokens-num" id="val-total">0</span>
+      <span class="h-tokens-delta" id="val-delta">— tokens</span>
+    </div>
+    <canvas id="sparkline-canvas" width="120" height="28" title="Token history (last 10 turns)"></canvas>
+  </header>
+
+  <!-- ── CONTROLS BAR ── -->
+  <div id="controls">
+    <button id="strip-btn" onclick="toggleStripping()" title="Strip old blocks before forwarding to Anthropic">STRIP <span id="strip-state">OFF</span></button>
+    <span style="font-size:9px;color:var(--dim)">keep</span>
+    <input id="strip-keep-last" type="number" min="1" max="99" value="6" title="Keep last N messages unstripped" onchange="setKeepLast(this.value)" style="width:32px;background:var(--surface);border:1px solid var(--border);color:var(--text);font-size:9px;padding:2px 4px;text-align:center" />
+    <span style="font-size:9px;color:var(--dim)">img after</span>
+    <input id="strip-image-after" type="number" min="1" max="20" value="2" title="Strip images older than N turns" onchange="setImageAfter(this.value)" style="width:28px;background:var(--surface);border:1px solid var(--border);color:var(--text);font-size:9px;padding:2px 4px;text-align:center" />
+    <button id="strip-img-btn" onclick="toggleStripImages()" title="Strip image blocks (base64)" style="font-size:9px;padding:2px 6px">IMG <span id="strip-img-state">ON</span></button>
+    <button id="strip-think-btn" onclick="toggleStripThinking()" title="Strip old thinking blocks" style="font-size:9px;padding:2px 6px">THINK <span id="strip-think-state">ON</span></button>
+    <span id="strip-saved" style="font-size:9px;color:var(--dim);margin-left:4px"></span>
+    <div style="margin-left:auto">
+      <button id="export-btn" onclick="downloadExport()" title="Export all captured logs as JSON" style="background:rgba(0,200,255,.08);border:1px solid rgba(0,200,255,.3);color:var(--cyan);font-size:9px;letter-spacing:.08em;padding:3px 8px;cursor:pointer;border-radius:2px;text-transform:uppercase">⬇ Export</button>
+    </div>
+  </div>
+
+  <!-- ── BODY ── -->
+  <div id="body">
+
+    <!-- LEFT -->
+    <div id="left">
+      <!-- Tab bar -->
+      <div class="left-tabs">
+        <button class="tab-btn active" onclick="switchTab('sessions')" id="tab-btn-sessions">Sessions</button>
+        <button class="tab-btn"        onclick="switchTab('cargo')"    id="tab-btn-cargo">Cargo</button>
+        <button class="tab-btn"        onclick="switchTab('package')"  id="tab-btn-package">Package</button>
+        <button class="tab-btn"        onclick="switchTab('fsreads')"  id="tab-btn-fsreads">FS Reads</button>
+      </div>
+
+      <!-- SESSIONS TAB -->
+      <div class="tab-pane active" id="tab-pane-sessions" style="flex-direction:column">
+        <div class="sessions-loading" id="sessions-loading"></div>
+        <div id="sessions-list">
+          <div style="color:var(--dim);font-size:10px;padding:12px;text-align:center">Connecting…</div>
+        </div>
+      </div>
+
+      <!-- CARGO TAB -->
+      <div class="tab-pane" id="tab-pane-cargo" style="flex-direction:column">
+        <!-- Cargo Breakdown -->
+        <div class="panel">
+          <div class="panel-title">Cargo Breakdown</div>
+          <div id="breakdown-bar">
+            <div class="bar-seg system"  id="seg-system"  style="width:0%;cursor:pointer" title="Click to inspect system prompt" onclick="openSysModal()"></div>
+            <div class="bar-seg tools"   id="seg-tools"   style="width:0%"></div>
+            <div class="bar-seg results" id="seg-results" style="width:0%"></div>
+            <div class="bar-seg text"    id="seg-text"    style="width:0%"></div>
+          </div>
+          <div id="breakdown-legend">
+            <div class="legend-item" onclick="openSysModal()" style="cursor:pointer;text-decoration:underline;text-decoration-color:rgba(61,106,204,.4)" title="Click to inspect system prompt">
+              <div class="legend-dot system"></div>
+              <span class="legend-name">system</span>
+              <span class="legend-val" id="leg-system">—</span>
+            </div>
+            <div class="legend-item">
+              <div class="legend-dot tools"></div>
+              <span class="legend-name">tool defs</span>
+              <span class="legend-val" id="leg-tools">—</span>
+            </div>
+            <div class="legend-item">
+              <div class="legend-dot results"></div>
+              <span class="legend-name">tool results</span>
+              <span class="legend-val" id="leg-results">—</span>
+            </div>
+            <div class="legend-item">
+              <div class="legend-dot text"></div>
+              <span class="legend-name">text</span>
+              <span class="legend-val" id="leg-text">—</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Strip Stats (hidden until stripping fires) -->
+        <div class="panel" id="strip-stats-panel" style="display:none">
+          <div class="panel-title" style="display:flex;align-items:center;justify-content:space-between">
+            <span>Strip History</span>
+            <span id="strip-stats-summary" style="font-size:9px;color:var(--dim)"></span>
+          </div>
+          <div style="overflow-x:auto">
+            <table style="width:100%;border-collapse:collapse;font-size:10px">
+              <thead>
+                <tr style="color:var(--dim);font-size:9px;text-transform:uppercase;letter-spacing:.08em">
+                  <th style="padding:3px 6px;text-align:left">Turn</th>
+                  <th style="padding:3px 6px;text-align:right">Before</th>
+                  <th style="padding:3px 6px;text-align:right">After</th>
+                  <th style="padding:3px 6px;text-align:right">Saved</th>
+                  <th style="padding:3px 6px;text-align:right">Img</th>
+                  <th style="padding:3px 6px;text-align:right">Think</th>
+                  <th style="padding:3px 6px;text-align:right">Tool</th>
+                  <th style="padding:3px 6px;text-align:right">Write</th>
+                </tr>
+              </thead>
+              <tbody id="strip-history-body"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Block Analysis -->
+        <div class="panel" id="block-analysis-panel" style="display:none">
+          <div class="panel-title" style="display:flex;align-items:center;justify-content:space-between">
+            <span>Block Analysis — Images in Context</span>
+            <span id="block-analysis-summary" style="font-size:9px;color:var(--dim)"></span>
+          </div>
+          <div style="overflow-x:auto">
+            <table style="width:100%;border-collapse:collapse;font-size:10px">
+              <thead>
+                <tr style="color:var(--dim)">
+                  <th style="padding:3px 6px;text-align:left">Msg</th>
+                  <th style="padding:3px 6px;text-align:left">Role</th>
+                  <th style="padding:3px 6px;text-align:right">Age</th>
+                  <th style="padding:3px 6px;text-align:right">~Tok</th>
+                  <th style="padding:3px 6px;text-align:right">Bytes</th>
+                  <th style="padding:3px 6px;text-align:left">Type</th>
+                  <th style="padding:3px 6px;text-align:left">Status</th>
+                </tr>
+              </thead>
+              <tbody id="block-analysis-body"></tbody>
+            </table>
+          </div>
+          <div id="block-analysis-tools" style="margin-top:8px;border-top:1px solid var(--border);padding-top:6px">
+            <div style="font-size:9px;color:var(--dim);margin-bottom:4px;text-transform:uppercase;letter-spacing:.1em">Large Tool Results in Context</div>
+            <table style="width:100%;border-collapse:collapse;font-size:10px">
+              <thead>
+                <tr style="color:var(--dim)">
+                  <th style="padding:3px 6px;text-align:left">Msg</th>
+                  <th style="padding:3px 6px;text-align:left">Tool</th>
+                  <th style="padding:3px 6px;text-align:right">Age</th>
+                  <th style="padding:3px 6px;text-align:right">~Tok</th>
+                  <th style="padding:3px 6px;text-align:left">Status</th>
+                </tr>
+              </thead>
+              <tbody id="block-tools-body"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Top Cargo -->
+        <div class="panel" style="flex:1;overflow:hidden;display:flex;flex-direction:column">
+          <div class="panel-title">Top Cargo (tool results)</div>
+          <div style="overflow-y:auto;flex:1">
+            <table id="cargo-table">
+              <thead>
+                <tr>
+                  <th>tool</th>
+                  <th></th>
+                  <th style="text-align:right">×</th>
+                  <th style="text-align:right">~tokens</th>
+                </tr>
+              </thead>
+              <tbody id="cargo-body">
+                <tr><td colspan="4" style="color:var(--dim);padding:10px 4px;font-size:10px">Waiting for first turn…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- PACKAGE TAB -->
+      <div class="tab-pane" id="tab-pane-package" style="flex-direction:column">
+        <div style="display:flex;align-items:center;justify-content:flex-end;padding:4px 8px 0;flex-shrink:0">
+          <button onclick="fetchPackageCapture(true)" title="Refresh package capture data" style="background:none;border:1px solid var(--border);color:var(--dim);font-size:9px;padding:2px 7px;cursor:pointer;border-radius:2px">↺ Refresh</button>
+        </div>
+        <div id="pkg-tab-content">
+          <div class="pkg-no-data">Start with <code style="color:var(--cyan)">node claude-monitor.js</code> to capture package internals.</div>
+        </div>
+      </div>
+
+      <!-- FS READS TAB -->
+      <div class="tab-pane" id="tab-pane-fsreads" style="flex-direction:column">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:4px 8px 0;flex-shrink:0">
+          <span style="font-size:9px;color:var(--dim)">Files read by cli.js per turn · <span style="color:var(--amber)">amber = likely system prompt builder</span></span>
+          <button onclick="fetchFsReads(true)" title="Refresh FS reads data" style="background:none;border:1px solid var(--border);color:var(--dim);font-size:9px;padding:2px 7px;cursor:pointer;border-radius:2px">↺ Refresh</button>
+        </div>
+        <div id="fsreads-content" style="flex:1;overflow-y:auto;padding:6px 8px">
+          <div style="color:var(--dim);font-size:10px;padding:12px;text-align:center">Launch via start.bat to capture fs reads.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT -->
+    <div id="right">
+      <div id="feed-header">
+        <div class="panel-title" style="flex:1">Turn Feed</div>
+        <span style="font-size:10px;color:var(--dim)" id="feed-subtitle">newest first · click to expand</span>
+      </div>
+
+      <div id="restore-banner"></div>
+      <div id="hist-banner">
+        <span>HISTORICAL SESSION</span>
+        <span id="hist-banner-sid" style="color:var(--dim);font-size:9px"></span>
+        <button id="hist-banner-btn" onclick="returnToLive()">RETURN TO LIVE</button>
+      </div>
+
+      <div id="turn-feed">
+        <div id="empty-state">
+          <div class="empty-icon">▣</div>
+          <div class="empty-msg">No turns intercepted yet.<br>Set env var and launch Claude Code:</div>
+          <div class="empty-cmd">export ANTHROPIC_BASE_URL=http://localhost:3579</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ── FOOTER ── -->
+  <footer id="footer">
+    <div class="f-item">
+      <span class="f-label">payload</span>
+      <span class="f-val cyan" id="f-bytes">—</span>
+    </div>
+    <div class="f-item">
+      <span class="f-label">cache marks</span>
+      <span class="f-val" id="f-cache">—</span>
+    </div>
+    <div class="f-item">
+      <span class="f-label">MCP servers</span>
+      <span class="f-val amber" id="f-mcp">—</span>
+    </div>
+    <div class="f-item">
+      <span class="f-label">stream</span>
+      <span class="f-val" id="f-stream">—</span>
+    </div>
+    <div class="f-item">
+      <span class="f-label">tool defs</span>
+      <span class="f-val" id="f-tools">—</span>
+    </div>
+    <div class="f-item" id="f-status">
+      <span class="f-status-text dead" id="f-status-text">● DISCONNECTED</span>
+    </div>
+    <div class="f-item" style="margin-left:auto;border-right:none;padding-right:0"></div>
+  </footer>
+
+</div>
+
+<script>
+// ────────────────────────────────────────────────────────────
+//  STATE
+// ────────────────────────────────────────────────────────────
+const state = {
+  connected:        false,
+  sessionStart:     null,   // ms timestamp from first turn
+  turns:            [],     // array of raw turn data objects
+  sparkHistory:     [],     // last 10 total token values
+  cumulative:       {},     // toolName → cumulative tokens
+  maxPayload:       1,      // for weight bar scaling
+  clockInterval:    null,
+  lastData:         null,   // last turn data
+  stripping:        false,  // current strip mode
+  stripImages:      true,   // strip image blocks
+  stripThinking:    true,   // strip thinking blocks
+  stripSaved:       0,      // cumulative tokens saved by stripping
+  stripHistory:     [],     // per-turn strip stats { turn, beforeTokens, afterTokens, savedTokens, count, images, thinking, toolResults, writeContent }
+  sessionId:        null,   // current live session ID from proxy
+  viewingSessionId: null,   // null = live, string = historical
+  pkgCacheLoaded:   false,  // whether package tab data has been fetched
+  pkgCacheEntries:  null,   // cached package capture entries
+};
+
+// ────────────────────────────────────────────────────────────
+//  LOCAL STORAGE PERSISTENCE
+// ────────────────────────────────────────────────────────────
+const LS_PREFIX   = 'xray_v1_';
+const LS_SESSIONS = LS_PREFIX + 'sessions';   // JSON array of {id, startTs, turns, maxTokens, model}
+const LS_TURN_PFX = LS_PREFIX + 'turns_';    // + sessionId → JSON array of turns
+const LS_ACTIVE   = LS_PREFIX + 'active_sid';
+const LS_MAX      = 3;                        // max sessions to cache
+
+function lsGet(key)        { try { return localStorage.getItem(key); }       catch { return null; } }
+function lsSet(key, value) { try { localStorage.setItem(key, value); }       catch {} }
+function lsDel(key)        { try { localStorage.removeItem(key); }           catch {} }
+
+function loadSessionSummaries() {
+  try { return JSON.parse(lsGet(LS_SESSIONS) || '[]'); } catch { return []; }
+}
+function saveSessionSummaries(arr) {
+  lsSet(LS_SESSIONS, JSON.stringify(arr));
+}
+
+function evictOldestSession() {
+  const summaries = loadSessionSummaries();
+  if (!summaries.length) return;
+  const oldest = summaries.sort((a, b) => (a.startTs || '').localeCompare(b.startTs || ''))[0];
+  lsDel(LS_TURN_PFX + oldest.id);
+  saveSessionSummaries(summaries.filter(s => s.id !== oldest.id));
+}
+
+function persistTurn(turn, sessionId) {
+  if (!sessionId) return;
+  // Guard: skip huge turns (over 200KB serialised) to avoid quota issues
+  const serialised = JSON.stringify(turn);
+  if (serialised.length > 200000) return;
+
+  const key = LS_TURN_PFX + sessionId;
+  const attempt = () => {
+    const existing = JSON.parse(lsGet(key) || '[]');
+    existing.push(turn);
+    lsSet(key, JSON.stringify(existing));
+  };
+  try {
+    attempt();
+  } catch (e) {
+    if (e.name === 'QuotaExceededError' || e.code === 22) {
+      evictOldestSession();
+      try { attempt(); } catch {}
+    }
+  }
+
+  // Update session summary
+  const summaries = loadSessionSummaries();
+  const idx       = summaries.findIndex(s => s.id === sessionId);
+  if (idx === -1) {
+    summaries.push({ id: sessionId, startTs: turn.ts, turns: 1, maxTokens: turn.tokens?.total || 0, model: turn.model });
+  } else {
+    summaries[idx].turns++;
+    summaries[idx].maxTokens = Math.max(summaries[idx].maxTokens || 0, turn.tokens?.total || 0);
+    summaries[idx].model     = turn.model || summaries[idx].model;
+  }
+  // Keep only LS_MAX sessions
+  while (summaries.length > LS_MAX) evictOldestSession();
+  saveSessionSummaries(summaries);
+
+  lsSet(LS_ACTIVE, sessionId);
+}
+
+function restoreFromLocalStorage() {
+  const activeSid = lsGet(LS_ACTIVE);
+  if (!activeSid) return;
+  const raw = lsGet(LS_TURN_PFX + activeSid);
+  if (!raw) return;
+  try {
+    const turns = JSON.parse(raw);
+    if (!turns.length) return;
+    // Only restore if last turn is recent (< 3 hours)
+    const lastTs = new Date(turns[turns.length - 1]?.ts || 0).getTime();
+    if (Date.now() - lastTs > 3 * 60 * 60 * 1000) return;
+    turns.forEach(t => processTurn(t, true));
+    // Apply cargo/breakdown from the most recent turn (already cumulative)
+    const lastTurn = turns[turns.length - 1];
+    if (lastTurn) {
+      updateBreakdown(lastTurn);
+      updateCargoTable(lastTurn.messages?.toolResultByName);
+    }
+    const banner = document.getElementById('restore-banner');
+    banner.textContent = `Restored ${turns.length} turns from cache (session ${activeSid})`;
+    banner.classList.add('visible');
+    setTimeout(() => banner.classList.remove('visible'), 4000);
+  } catch {}
+}
+
+// ────────────────────────────────────────────────────────────
+//  HELPERS
+// ────────────────────────────────────────────────────────────
+function fmt(n) {
+  if (n == null || isNaN(n)) return '—';
+  return Number(n).toLocaleString();
+}
+function fmtKB(bytes) {
+  if (!bytes) return '—';
+  return (bytes / 1024).toFixed(1) + ' KB';
+}
+function fmtTokens(n) {
+  if (!n) return '—';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
+  return String(n);
+}
+function timeSince(ms) {
+  const s = Math.floor((Date.now() - ms) / 1000);
+  const m = Math.floor(s / 60);
+  const h = Math.floor(m / 60);
+  if (h > 0) return `${h}h ${m % 60}m`;
+  if (m > 0) return `${m}m ${s % 60}s`;
+  return `${s}s`;
+}
+function tsToTime(isoStr) {
+  try {
+    const d = new Date(isoStr);
+    return d.toLocaleTimeString([], { hour12: false });
+  } catch { return '—'; }
+}
+function getMcpServer(name) {
+  const m = (name || '').match(/^mcp__([^_]+)/);
+  return m ? m[1] : null;
+}
+function isMcp(name) { return !!getMcpServer(name); }
+
+// ────────────────────────────────────────────────────────────
+//  COUNTER ANIMATION
+// ────────────────────────────────────────────────────────────
+const animTargets = {};
+function animateCount(el, target, suffix = '', color = null) {
+  const key = el.id || el;
+  if (animTargets[key]) cancelAnimationFrame(animTargets[key]);
+  const start  = parseInt(el.textContent.replace(/[^0-9]/g, '')) || 0;
+  const delta  = target - start;
+  const dur    = Math.min(400, Math.abs(delta) * .1 + 80);
+  const t0     = performance.now();
+  function step(now) {
+    const p = Math.min((now - t0) / dur, 1);
+    const e = 1 - Math.pow(1 - p, 3); // ease-out-cubic
+    const v = Math.round(start + delta * e);
+    el.textContent = fmt(v) + (suffix || '');
+    if (color) el.style.color = color;
+    if (p < 1) animTargets[key] = requestAnimationFrame(step);
+  }
+  animTargets[key] = requestAnimationFrame(step);
+}
+
+// ────────────────────────────────────────────────────────────
+//  SPARKLINE
+// ────────────────────────────────────────────────────────────
+const canvas = document.getElementById('sparkline-canvas');
+const ctx    = canvas.getContext('2d');
+
+function drawSparkline(data) {
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  if (data.length < 2) return;
+
+  const max = Math.max(...data) || 1;
+  const min = Math.min(...data);
+  const range = max - min || 1;
+  const pts = data.map((v, i) => ({
+    x: (i / (data.length - 1)) * (W - 4) + 2,
+    y: H - 4 - ((v - min) / range) * (H - 8),
+  }));
+
+  // Area fill
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, 'rgba(240,165,0,.35)');
+  grad.addColorStop(1, 'rgba(240,165,0,0)');
+  ctx.beginPath();
+  ctx.moveTo(pts[0].x, H);
+  pts.forEach(p => ctx.lineTo(p.x, p.y));
+  ctx.lineTo(pts[pts.length - 1].x, H);
+  ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Line
+  ctx.beginPath();
+  ctx.strokeStyle = '#f0a500';
+  ctx.lineWidth = 1.5;
+  ctx.lineJoin = 'round';
+  pts.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
+  ctx.stroke();
+
+  // Latest dot
+  const last = pts[pts.length - 1];
+  ctx.beginPath();
+  ctx.arc(last.x, last.y, 2.5, 0, Math.PI * 2);
+  ctx.fillStyle = '#f0a500';
+  ctx.fill();
+}
+
+// ────────────────────────────────────────────────────────────
+//  SYSTEM INSPECTOR MODAL
+// ────────────────────────────────────────────────────────────
+function highlightSysText(text) {
+  // Very simple syntax highlight for markdown-ish system prompts
+  return text
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/^(#{1}\s.+)$/gm, '<span style="color:#e6edf3;font-weight:bold">$1</span>')
+    .replace(/^(#{2}\s.+)$/gm, '<span style="color:#7aa2f7">$1</span>')
+    .replace(/^(#{3,4}\s.+)$/gm, '<span style="color:#00d4ff">$1</span>')
+    .replace(/^(-{3,}|={3,})$/gm, '<span style="color:#30363d">$1</span>')
+    .replace(/`([^`]+)`/g, '<span style="color:#f0a500">$1</span>')
+    .replace(/\*\*([^*]+)\*\*/g, '<span style="color:#e6edf3;font-weight:bold">$1</span>');
+}
+
+function renderSectionTable(sections) {
+  if (!sections || !sections.length) return '';
+  const maxTok = Math.max(...sections.map(s => s.tokens)) || 1;
+  const rows = sections.map(s => {
+    const pct = (s.tokens / maxTok * 100).toFixed(1);
+    const cls = s.origin || 'unknown';
+    const esc = (s.header||'').replace(/&/g,'&amp;').replace(/</g,'&lt;');
+    const depthMark = s.depth > 1 ? '└ ' : '';
+    return `
+      <div class="section-row">
+        <span class="section-depth">${'#'.repeat(s.depth||0)}</span>
+        <span class="section-name" title="${esc}">${depthMark}${esc}</span>
+        <div class="section-bar-track"><div class="section-bar-fill ${cls}" style="width:${pct}%"></div></div>
+        <span class="section-tok ${cls}">${fmtTokens(s.tokens)}</span>
+        <span class="section-badge ${cls}">${s.origin === 'core' ? 'core' : s.origin === 'env' ? 'env' : s.origin === 'user' ? 'user' : '?'}</span>
+        <span class="section-fn">${s.fn || ''}</span>
+      </div>`;
+  }).join('');
+  return `<div class="section-table"><div class="section-table-title">Section-Level Breakdown</div>${rows}</div>`;
+}
+
+function renderSysBlock(block, totalTokens, idx) {
+  const pct = totalTokens > 0 ? (block.tokens / totalTokens * 100).toFixed(1) : 0;
+  const cachedBadge = block.cached ? `<span class="cached-badge">${block.cached}</span>` : '';
+  const sectionHtml = renderSectionTable(block.sections);
+
+  const card = document.createElement('div');
+  card.className = 'sys-block-card';
+  card.innerHTML = `
+    <div class="sys-block-header" onclick="this.parentElement.classList.toggle('open')">
+      <span class="sys-block-num">BLOCK ${idx + 1}</span>
+      <span class="sys-block-label">${block.label || '(unlabeled)'}</span>
+      <span class="sys-block-meta">
+        <span class="tok">${fmtTokens(block.tokens)} tok</span>
+        <span class="lines">${(block.lines||0).toLocaleString()} lines</span>
+        ${cachedBadge}
+        <span style="font-size:9px;color:var(--dim)">${pct}%</span>
+      </span>
+      <span class="sys-block-chevron">▶</span>
+    </div>
+    <div class="sys-block-content">
+      <div class="sys-block-bar-track">
+        <div class="sys-block-bar-fill" style="width:${pct}%"></div>
+      </div>
+      <div class="sys-block-stats">
+        chars: <span>${(block.chars||0).toLocaleString()}</span>
+        tokens: <span>${fmtTokens(block.tokens)}</span>
+        lines: <span>${(block.lines||0).toLocaleString()}</span>
+        fixed: <span style="color:#ef5350">${fmtTokens(block.fixedTok||0)}</span>
+        dynamic: <span style="color:#66bb6a">${fmtTokens(block.dynamicTok||0)}</span>
+        ${block.cached ? `cache: <span style="color:var(--green)">${block.cached}</span>` : ''}
+      </div>
+      ${sectionHtml}
+      <div class="sys-preview" id="preview-${idx}">${highlightSysText((block.preview||'').slice(0,600))}${block.chars > 600 ? '\n\n<span style="color:var(--dim)">… (truncated, click button below for full)</span>' : ''}</div>
+      <button class="sys-full-btn" onclick="expandFullBlock(${idx}, this)">Show full content (${(block.chars||0).toLocaleString()} chars)</button>
+    </div>
+  `;
+  if (idx === 0) card.classList.add('open');
+  return card;
+}
+
+let _lastSysData = null;
+
+async function openSysModal() {
+  document.getElementById('sys-modal-backdrop').classList.add('open');
+  const body = document.getElementById('sys-modal-body');
+  body.innerHTML = '<div style="color:var(--dim);padding:20px;text-align:center">Fetching from proxy…</div>';
+
+  try {
+    const res = await fetch('/system');
+    const data = await res.json();
+    _lastSysData = data;
+    const blocks = data.blocks || [];
+    const totalTokens = blocks.reduce((s, b) => s + (b.tokens || 0), 0);
+    const totalFixed = data.totalFixed || blocks.reduce((s, b) => s + (b.fixedTok || 0), 0);
+    const totalDynamic = data.totalDynamic || blocks.reduce((s, b) => s + (b.dynamicTok || 0), 0);
+    const cross = data.crossTurn || { identical: 0, changed: 0, changeTurns: [] };
+    const totalTurns = cross.identical + cross.changed;
+    const hitPct = totalTurns > 0 ? ((cross.identical / totalTurns) * 100).toFixed(0) : '—';
+
+    document.getElementById('sys-modal-subtitle').textContent =
+      `${blocks.length} block${blocks.length !== 1 ? 's' : ''} · ${fmtTokens(totalTokens)} total tokens · rebuilt every turn`;
+
+    body.innerHTML = '';
+    if (!blocks.length) {
+      body.innerHTML = '<div style="color:var(--dim);padding:20px">No system data captured yet.</div>';
+      return;
+    }
+
+    // ── Summary strip ──
+    const fixedPct = totalTokens > 0 ? (totalFixed / totalTokens * 100).toFixed(0) : 0;
+    const dynPct   = totalTokens > 0 ? (totalDynamic / totalTokens * 100).toFixed(0) : 0;
+    const cacheCtrl = blocks.map(b => b.cached ? `[${b.cached}]` : '[null]').join(' ');
+    const changeTurnList = cross.changeTurns.length
+      ? cross.changeTurns.map(t => `T${t}`).join(', ')
+      : 'none yet';
+
+    const summaryDiv = document.createElement('div');
+    summaryDiv.className = 'sys-summary';
+    summaryDiv.innerHTML = `
+      <div class="sys-summary-title">Pipeline: GW() → TWK() → qA7(NJ6 split) → EBY(cache_control) → W6(API request)</div>
+      <div class="sys-summary-bars">
+        <div class="sys-summary-bar">
+          <div class="sys-sum-fill-fixed" style="width:${fixedPct}%"></div>
+          <div class="sys-sum-fill-dynamic" style="width:${dynPct}%"></div>
+        </div>
+      </div>
+      <div class="sys-summary-labels">
+        <span class="lbl"><span class="dot-fixed"></span> Fixed (package core): <strong style="color:#ef5350">${fmtTokens(totalFixed)} tok</strong> (${fixedPct}%)</span>
+        <span class="lbl"><span class="dot-dyn"></span> Dynamic (env/memory/skills): <strong style="color:#66bb6a">${fmtTokens(totalDynamic)} tok</strong> (${dynPct}%)</span>
+      </div>
+      <div class="sys-cross-turn">
+        Cache strategy: <span>${cacheCtrl}</span> ·
+        Cross-turn: identical <span class="${hitPct > 80 ? 'hit' : 'miss'}">${cross.identical}/${totalTurns}</span> turns (${hitPct}% cache-hit eligible) ·
+        Changed at: <span class="miss">${changeTurnList}</span>
+      </div>
+    `;
+    body.appendChild(summaryDiv);
+
+    blocks.forEach((block, i) => body.appendChild(renderSysBlock(block, totalTokens, i)));
+  } catch (e) {
+    body.innerHTML = `<div style="color:var(--red);padding:20px">Error: ${e.message}</div>`;
+  }
+}
+
+function expandFullBlock(idx, btn) {
+  if (!_lastSysData) return;
+  const block = _lastSysData.blocks[idx];
+  if (!block) return;
+  const el = document.getElementById(`preview-${idx}`);
+  if (el) {
+    el.innerHTML = highlightSysText(block.full || block.preview || '');
+    btn.style.display = 'none';
+  }
+}
+
+function closeSysModal() {
+  document.getElementById('sys-modal-backdrop').classList.remove('open');
+}
+
+// Close on Escape
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSysModal(); });
+
+// ────────────────────────────────────────────────────────────
+//  STRIP TOGGLE
+// ────────────────────────────────────────────────────────────
+function applyStripState(cfg) {
+  // cfg can be boolean (legacy) or full config object
+  const on = typeof cfg === 'boolean' ? cfg : cfg.stripping;
+  state.stripping = on;
+  const btn = document.getElementById('strip-btn');
+  const lbl = document.getElementById('strip-state');
+  btn.className = on ? 'active' : '';
+  lbl.textContent = on ? 'ON' : 'OFF';
+
+  if (typeof cfg === 'object') {
+    // Sync image toggle
+    if (typeof cfg.stripImages === 'boolean') {
+      state.stripImages = cfg.stripImages;
+      const ib = document.getElementById('strip-img-btn');
+      const il = document.getElementById('strip-img-state');
+      if (ib) ib.className = cfg.stripImages ? 'active' : '';
+      if (il) il.textContent = cfg.stripImages ? 'ON' : 'OFF';
+    }
+    // Sync thinking toggle
+    if (typeof cfg.stripThinking === 'boolean') {
+      state.stripThinking = cfg.stripThinking;
+      const tb = document.getElementById('strip-think-btn');
+      const tl = document.getElementById('strip-think-state');
+      if (tb) tb.className = cfg.stripThinking ? 'active' : '';
+      if (tl) tl.textContent = cfg.stripThinking ? 'ON' : 'OFF';
+    }
+    // Sync image-after input
+    if (typeof cfg.stripImageAfter === 'number') {
+      const inp = document.getElementById('strip-image-after');
+      if (inp) inp.value = cfg.stripImageAfter;
+    }
+    // Sync keep-last input
+    if (typeof cfg.stripKeepLast === 'number') {
+      const inp = document.getElementById('strip-keep-last');
+      if (inp) inp.value = cfg.stripKeepLast;
+    }
+  }
+}
+
+async function toggleStripping() {
+  try {
+    const res = await fetch('/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stripping: !state.stripping }),
+    });
+    applyStripState(await res.json());
+  } catch (e) { console.error('config toggle failed', e); }
+}
+
+async function toggleStripImages() {
+  try {
+    const res = await fetch('/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stripImages: !state.stripImages }),
+    });
+    applyStripState(await res.json());
+  } catch (e) { console.error('toggleStripImages failed', e); }
+}
+
+async function toggleStripThinking() {
+  try {
+    const res = await fetch('/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stripThinking: !state.stripThinking }),
+    });
+    applyStripState(await res.json());
+  } catch (e) { console.error('toggleStripThinking failed', e); }
+}
+
+async function setImageAfter(val) {
+  const n = parseInt(val, 10);
+  if (!n || n < 1) return;
+  try {
+    await fetch('/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stripImageAfter: n }),
+    });
+  } catch (e) { console.error('setImageAfter failed', e); }
+}
+
+function updateStripSaved(entry) {
+  state.stripSaved += entry.savedTokens || 0;
+  state.stripHistory.push(entry);
+  if (state.stripSaved > 0) {
+    document.getElementById('strip-saved').textContent = `−${fmt(state.stripSaved)} tok saved`;
+  }
+  renderStripStats();
+}
+
+function renderStripStats() {
+  const panel = document.getElementById('strip-stats-panel');
+  const tbody = document.getElementById('strip-history-body');
+  const summary = document.getElementById('strip-stats-summary');
+  if (!panel || !tbody || !state.stripHistory.length) return;
+  panel.style.display = '';
+  const totalSaved = state.stripHistory.reduce((s, r) => s + (r.savedTokens || 0), 0);
+  summary.textContent = `${state.stripHistory.length} turn${state.stripHistory.length > 1 ? 's' : ''} · −${fmt(totalSaved)} tok total`;
+  tbody.innerHTML = state.stripHistory.map(r => `
+    <tr style="border-top:1px solid var(--border)">
+      <td style="padding:3px 6px;color:var(--dim)">T${r.turn}</td>
+      <td style="padding:3px 6px;text-align:right;color:var(--text)">${fmt(r.beforeTokens)}</td>
+      <td style="padding:3px 6px;text-align:right;color:var(--text)">${fmt(r.afterTokens)}</td>
+      <td style="padding:3px 6px;text-align:right;color:var(--green)">−${fmt(r.savedTokens)}</td>
+      <td style="padding:3px 6px;text-align:right;color:${r.images   ? 'var(--yellow)' : 'var(--dim)'}">${r.images   || '·'}</td>
+      <td style="padding:3px 6px;text-align:right;color:${r.thinking ? 'var(--yellow)' : 'var(--dim)'}">${r.thinking || '·'}</td>
+      <td style="padding:3px 6px;text-align:right;color:${r.toolResults ? 'var(--yellow)' : 'var(--dim)'}">${r.toolResults || '·'}</td>
+      <td style="padding:3px 6px;text-align:right;color:${r.writeContent ? 'var(--yellow)' : 'var(--dim)'}">${r.writeContent || '·'}</td>
+    </tr>`).join('');
+}
+
+async function setKeepLast(val) {
+  const n = parseInt(val, 10);
+  if (!n || n < 1) return;
+  try {
+    await fetch('/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stripKeepLast: n }),
+    });
+  } catch (e) { console.error('setKeepLast failed', e); }
+}
+
+async function downloadExport() {
+  const btn = document.getElementById('export-btn');
+  const orig = btn.textContent;
+  btn.textContent = '⬇ …';
+  btn.disabled = true;
+  try {
+    const res = await fetch('/export');
+    const blob = await res.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    a.download = `xray-export-${ts}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  } catch (e) { console.error('export failed', e); }
+  btn.textContent = orig;
+  btn.disabled = false;
+}
+
+// ────────────────────────────────────────────────────────────
+//  CONNECTION STATUS
+// ────────────────────────────────────────────────────────────
+function setConnected(v) {
+  state.connected = v;
+  document.getElementById('conn-dot').className = 'dot' + (v ? ' live' : '');
+  const st = document.getElementById('f-status-text');
+  st.textContent = v ? '● LIVE' : '● DISCONNECTED';
+  st.className = 'f-status-text ' + (v ? 'live' : 'dead');
+}
+
+// ────────────────────────────────────────────────────────────
+//  HEADER FLASH
+// ────────────────────────────────────────────────────────────
+function flashHeader() {
+  const h = document.getElementById('header');
+  h.classList.add('flash');
+  setTimeout(() => h.classList.remove('flash'), 600);
+}
+
+// ────────────────────────────────────────────────────────────
+//  CARGO TABLE
+// ────────────────────────────────────────────────────────────
+function updateCargoTable(toolResultByName) {
+  const tbody = document.getElementById('cargo-body');
+  if (!toolResultByName || !Object.keys(toolResultByName).length) return;
+
+  // Update cumulative
+  for (const [name, v] of Object.entries(toolResultByName)) {
+    state.cumulative[name] = (state.cumulative[name] || 0) + (v.tokens || 0);
+  }
+
+  // Sort cumulative desc
+  const sorted = Object.entries(state.cumulative).sort((a, b) => b[1] - a[1]);
+  const maxTok = sorted[0]?.[1] || 1;
+
+  tbody.innerHTML = '';
+  for (const [name, cumTok] of sorted) {
+    const cur  = toolResultByName[name] || { count: 0, tokens: 0 };
+    const pct  = cumTok / maxTok * 100;
+    const heavy = pct > 50;
+    const mcp  = isMcp(name);
+    const displayName = name.length > 22 ? name.slice(0, 20) + '…' : name;
+
+    const tr = document.createElement('tr');
+    tr.className = 'cargo-row';
+    tr.innerHTML = `
+      <td><span class="cargo-name">${displayName}${mcp ? '<span class="mcp-star">★</span>' : ''}</span></td>
+      <td class="cargo-bar-cell">
+        <div class="cargo-bar-track">
+          <div class="cargo-bar-fill ${heavy ? 'heavy' : mcp ? 'mcp' : ''}" style="width:${pct.toFixed(1)}%"></div>
+        </div>
+      </td>
+      <td class="cargo-count">${cur.count || '—'}</td>
+      <td class="cargo-tok ${heavy ? 'heavy' : ''}">${fmtTokens(cumTok)}</td>
+    `;
+    tbody.appendChild(tr);
+  }
+}
+
+// ────────────────────────────────────────────────────────────
+//  BREAKDOWN BAR
+// ────────────────────────────────────────────────────────────
+function updateBreakdown(d) {
+  const sys  = d.tokens.system   || 0;
+  const tool = d.tokens.tools    || 0;
+  const res  = Object.values(d.messages.toolResultByName || {}).reduce((s,v)=>s+(v.tokens||0),0);
+  const txt  = d.messages.textTokens || 0;
+  const total = sys + tool + res + txt || 1;
+
+  document.getElementById('seg-system').style.width  = (sys  / total * 100).toFixed(1) + '%';
+  document.getElementById('seg-tools').style.width   = (tool / total * 100).toFixed(1) + '%';
+  document.getElementById('seg-results').style.width = (res  / total * 100).toFixed(1) + '%';
+  document.getElementById('seg-text').style.width    = (txt  / total * 100).toFixed(1) + '%';
+
+  document.getElementById('leg-system').textContent  = fmtTokens(sys)  + ' tok';
+  document.getElementById('leg-tools').textContent   = fmtTokens(tool) + ' tok';
+  document.getElementById('leg-results').textContent = fmtTokens(res)  + ' tok';
+  document.getElementById('leg-text').textContent    = fmtTokens(txt)  + ' tok';
+}
+
+// ────────────────────────────────────────────────────────────
+//  TURN ROW
+// ────────────────────────────────────────────────────────────
+function buildWagonSection(d) {
+  const w = d.wagon;
+  if (!w) return '';
+
+  // Wagon delta
+  const deltaSection = `
+    <div class="detail-section-title">Wagon Delta
+      <span class="badge">+${w.newMsgCount} msgs · +${fmtTokens(w.newTokens)} tok</span>
+    </div>
+    <div class="wagon-delta-row">
+      <span class="wagon-stat"><strong>${w.newMsgCount}</strong> new msgs this turn</span>
+      <span class="wagon-stat"><strong>+${fmtTokens(w.newTokens)}</strong> new tokens</span>
+      <span class="wagon-stat">rate: <strong>${fmtTokens(w.growthRate)}</strong> tok/msg</span>
+    </div>`;
+
+  // npm flags
+  const npmSection = (w.npmFlags && w.npmFlags.length) ? w.npmFlags.map(cmd => `
+    <div class="npm-flag-box"><span class="npm-flag-label">npm/pkg</span>${cmd.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>`).join('') : '';
+
+  // Heaviest messages
+  const heavySection = (w.heaviest && w.heaviest.length) ? `
+    <div class="detail-tools-title">Heaviest messages in context</div>
+    ${w.heaviest.map(m => `
+      <div class="heaviest-row">
+        <span class="heaviest-idx">[${m.idx}]</span>
+        <span class="heaviest-role">${m.role}</span>
+        <span class="heaviest-tok">${fmtTokens(m.tokens)}</span>
+        <span class="heaviest-type">${m.topBlockType || ''}${m.topBlockTool ? ' · ' + (m.topBlockTool.length > 20 ? m.topBlockTool.slice(0,18)+'…' : m.topBlockTool) : ''}</span>
+      </div>`).join('')}` : '';
+
+  // Tool defs by server
+  const srvEntries = Object.entries(w.toolsByServer || {});
+  const srvSection = srvEntries.length ? `
+    <div class="detail-tools-title">Tool defs overhead (per server)</div>
+    ${srvEntries.sort((a,b) => b[1]-a[1]).map(([srv, tok]) =>
+      `<div class="heaviest-row"><span class="heaviest-role" style="min-width:100px">${srv}</span><span class="heaviest-tok">${fmtTokens(tok)} tok</span></div>`
+    ).join('')}` : '';
+
+  // Full inventory button
+  const invBtn = `<button class="sys-full-btn" style="margin-top:5px" onclick="openWagonModal(event,${d.turn},'${(d.sessionId||'').replace(/'/g,'')}')" title="Full per-message inventory from wagon.jsonl">Full inventory (wagon.jsonl)</button>`;
+
+  return deltaSection + npmSection + heavySection + srvSection + invBtn;
+}
+
+function buildTurnRow(d, fromHistory = false) {
+  const total  = d.tokens.total  || 0;
+  const delta  = d.tokens.delta  || 0;
+  const pct    = Math.min(total / state.maxPayload * 100, 100);
+
+  // Weight bar color: green → amber → red based on pct
+  let fillColor = '#00ff88';
+  if (pct > 70) fillColor = '#ff4444';
+  else if (pct > 40) fillColor = '#f0a500';
+  else if (pct > 20) fillColor = '#00d4ff';
+
+  const tools = d.messages.toolResultByName || {};
+  const toolsSorted = Object.entries(tools).sort((a, b) => b[1].tokens - a[1].tokens);
+  const maxToolTok = toolsSorted[0]?.[1].tokens || 1;
+
+  const toolRows = toolsSorted.map(([name, v]) => {
+    const p = (v.tokens / maxToolTok * 100).toFixed(1);
+    const heavy = p > 50;
+    const mcp   = isMcp(name);
+    const dn    = name.length > 28 ? name.slice(0, 26) + '…' : name;
+    return `
+      <div class="detail-tool-row">
+        <span class="detail-tool-name">${dn}${mcp ? ' ★' : ''}</span>
+        <div class="detail-tool-bar-track">
+          <div class="detail-tool-bar-fill ${heavy ? 'heavy' : ''}" style="width:${p}%"></div>
+        </div>
+        <span class="detail-tool-tok">${fmtTokens(v.tokens)}</span>
+        <span style="color:var(--dim);font-size:10px;min-width:28px;text-align:right">×${v.count}</span>
+      </div>
+    `;
+  }).join('');
+
+  const mcpList = (d.messages.mcpServers || []).join(', ') || '—';
+  const cacheCC = (d.system?.cacheControl || []).filter(Boolean).length;
+
+  // ── Tool definition overhead breakdown ──
+  let toolDefSection = '';
+  if (d.tools?.perTool?.length) {
+    const top = d.tools.perTool.slice(0, 15);
+    const maxTok = top[0].tokens || 1;
+    const totalToolTok = d.tools.tokens || 1;
+    const totalPayload = d.tokens.total || 1;
+    const overheadPct = ((d.tokens.tools || 0) / totalPayload * 100).toFixed(0);
+    const toolDefRows = top.map(t => {
+      const p = (t.tokens / maxTok * 100).toFixed(1);
+      const pctOfTools = (t.tokens / totalToolTok * 100).toFixed(0);
+      const dn = t.name.length > 36 ? t.name.slice(0, 34) + '…' : t.name;
+      return `
+        <div class="overhead-row">
+          <span class="overhead-name">${dn}${t.mcp ? '<span class="mcp-tag">★</span>' : ''}</span>
+          <div class="overhead-bar-track">
+            <div class="overhead-bar-fill ${t.mcp ? 'mcp' : ''}" style="width:${p}%"></div>
+          </div>
+          <span class="overhead-tok">${fmtTokens(t.tokens)}</span>
+          <span class="overhead-pct">${pctOfTools}%</span>
+        </div>`;
+    }).join('');
+    const more = d.tools.perTool.length > 15 ? `<div style="font-size:9px;color:var(--dim);margin-top:3px">+${d.tools.perTool.length - 15} more tools not shown</div>` : '';
+    toolDefSection = `
+      <div class="detail-section-title">Tool Definition Overhead <span class="badge">${overheadPct}% of payload</span></div>
+      ${toolDefRows}
+      ${more}
+      <div class="overhead-summary">overhead: <span>${fmtTokens(d.tokens.tools)} tok</span> · tools: <span>${d.tools.count}</span> · avg/tool: <span>${fmtTokens(Math.round((d.tokens.tools||0)/d.tools.count))} tok</span></div>
+    `;
+  }
+
+  // ── System block breakdown ──
+  let sysBlockSection = '';
+  if (d.system?.perBlock?.length > 1) {
+    const totalSysTok = d.tokens.system || 1;
+    const sysPct = (totalSysTok / (d.tokens.total || 1) * 100).toFixed(0);
+    const blockRows = d.system.perBlock.map(b => {
+      const p = (b.tokens / totalSysTok * 100).toFixed(1);
+      const cachedTag = b.cached ? `<span style="color:var(--green);font-size:9px;margin-left:4px">[${b.cached}]</span>` : '';
+      return `
+        <div class="overhead-row">
+          <span class="overhead-name">block ${b.i + 1}${cachedTag}</span>
+          <div class="overhead-bar-track">
+            <div class="overhead-bar-fill sys" style="width:${p}%"></div>
+          </div>
+          <span class="overhead-tok sys">${fmtTokens(b.tokens)}</span>
+          <span class="overhead-pct">${p}%</span>
+        </div>`;
+    }).join('');
+    sysBlockSection = `
+      <div class="detail-section-title">System Prompt Blocks <span class="badge sys">${sysPct}% of payload</span></div>
+      ${blockRows}
+    `;
+  }
+
+  const div = document.createElement('div');
+  div.className = fromHistory ? 'turn-row' : 'turn-row new-flash';
+  div.dataset.turn = d.turn;
+  if (!fromHistory) setTimeout(() => div.classList.remove('new-flash'), 600);
+
+  div.innerHTML = `
+    <div class="turn-summary">
+      <span class="turn-num">T<strong>${d.turn}</strong></span>
+      <span class="turn-time">${tsToTime(d.ts)}</span>
+      <div class="turn-weight">
+        <div class="turn-weight-fill" style="width:${pct.toFixed(1)}%;background:${fillColor}"></div>
+      </div>
+      <span class="turn-delta ${delta >= 0 ? 'pos' : 'neg'}">${delta >= 0 ? '+' : ''}${fmt(delta)}</span>
+      <span class="turn-total">${fmt(total)}</span>
+      <span class="turn-chevron">▶</span>
+    </div>
+    <div class="turn-detail">
+      <div class="detail-grid">
+        <div class="detail-kv"><span class="detail-k">model</span><span class="detail-v">${d.model || '—'}</span></div>
+        <div class="detail-kv"><span class="detail-k">payload</span><span class="detail-v cyan">${fmtKB(d.bodyBytes)}</span></div>
+        <div class="detail-kv"><span class="detail-k">messages</span><span class="detail-v">${d.messages.total} (u:${d.messages.byRole.user||0} a:${d.messages.byRole.assistant||0})</span></div>
+        <div class="detail-kv"><span class="detail-k">tool blocks</span><span class="detail-v">${d.messages.toolResultBlocks} results / ${d.messages.toolUseBlocks} calls</span></div>
+        <div class="detail-kv"><span class="detail-k">cache marks</span><span class="detail-v">${d.messages.cacheBlocks} blocks (${cacheCC} system)</span></div>
+        <div class="detail-kv"><span class="detail-k">MCP servers</span><span class="detail-v amber">${mcpList}</span></div>
+        <div class="detail-kv"><span class="detail-k">sys tokens</span><span class="detail-v cyan">${fmtTokens(d.tokens.system)}</span></div>
+        <div class="detail-kv"><span class="detail-k">tool def tokens</span><span class="detail-v cyan">${fmtTokens(d.tokens.tools)}</span></div>
+      </div>
+      ${toolRows ? `<div class="detail-tools-title">Tool Result Cargo</div>${toolRows}` : ''}
+      ${sysBlockSection}
+      ${toolDefSection}
+      ${buildWagonSection(d)}
+    </div>
+  `;
+
+  div.querySelector('.turn-summary').addEventListener('click', () => {
+    div.classList.toggle('expanded');
+  });
+
+  return div;
+}
+
+// ────────────────────────────────────────────────────────────
+//  PROCESS TURN
+// ────────────────────────────────────────────────────────────
+function processTurn(d, fromHistory = false) {
+  state.lastData = d;
+  state.turns.unshift(d);
+  if (state.turns.length > 100) state.turns.pop();
+
+  // Track session ID from SSE payload
+  if (!fromHistory && d.sessionId) {
+    if (state.sessionId && state.sessionId !== d.sessionId) {
+      // New session started — invalidate package tab cache
+      state.pkgCacheLoaded  = false;
+      state.pkgCacheEntries = null;
+    }
+    if (!state.sessionId) state.sessionId = d.sessionId;
+    persistTurn(d, d.sessionId);
+  }
+
+  // Session start
+  if (!state.sessionStart) {
+    try { state.sessionStart = new Date(d.ts).getTime(); } catch { state.sessionStart = Date.now(); }
+  }
+
+  // Max payload tracking
+  state.maxPayload = Math.max(state.maxPayload, d.tokens.total || 1);
+
+  // Sparkline
+  state.sparkHistory.push(d.tokens.total || 0);
+  if (state.sparkHistory.length > 10) state.sparkHistory.shift();
+
+  // Header (skip animation when replaying history)
+  if (!fromHistory) flashHeader();
+  if (!fromHistory) {
+    animateCount(document.getElementById('val-total'), d.tokens.total || 0);
+  } else {
+    document.getElementById('val-total').textContent = fmt(d.tokens.total || 0);
+  }
+  document.getElementById('val-turn').textContent  = d.turn;
+  document.getElementById('val-model').textContent = (d.model || '').replace('claude-', '');
+  document.getElementById('val-msgs').textContent  = d.messages.total + ' msgs';
+
+  const deltaEl = document.getElementById('val-delta');
+  const delta   = d.tokens.delta || 0;
+  deltaEl.textContent = (delta >= 0 ? '+' : '') + fmt(delta) + ' tokens';
+  deltaEl.className   = 'h-tokens-delta ' + (delta > 0 ? 'up' : '');
+
+  // Sparkline draw
+  drawSparkline(state.sparkHistory);
+
+  // Breakdown + Cargo (skip during history replay — applied once after restore)
+  if (!fromHistory) {
+    updateBreakdown(d);
+    updateCargoTable(d.messages.toolResultByName);
+  }
+
+  // Turn feed
+  const feed  = document.getElementById('turn-feed');
+  const empty = document.getElementById('empty-state');
+  if (empty) empty.remove();
+
+  const row = buildTurnRow(d, fromHistory);
+  feed.insertBefore(row, feed.firstChild);
+
+  // Update all existing rows' weight bars (max may have changed)
+  feed.querySelectorAll('.turn-row').forEach(r => {
+    const t  = parseInt(r.dataset.turn);
+    const td = state.turns.find(x => x.turn === t);
+    if (!td) return;
+    const pct  = Math.min((td.tokens.total || 0) / state.maxPayload * 100, 100);
+    const fill = r.querySelector('.turn-weight-fill');
+    if (fill) fill.style.width = pct.toFixed(1) + '%';
+  });
+
+  // Footer
+  document.getElementById('f-bytes').textContent  = fmtKB(d.bodyBytes);
+  document.getElementById('f-cache').textContent  = d.messages.cacheBlocks || 0;
+  document.getElementById('f-mcp').textContent    = d.messages.mcpServers?.join(', ') || '—';
+  document.getElementById('f-stream').textContent = d.stream ? 'yes' : 'no';
+  document.getElementById('f-tools').textContent  = d.tools ? `${d.tools.count} defs` : '—';
+
+  // Clock
+  if (!state.clockInterval) {
+    state.clockInterval = setInterval(() => {
+      if (state.sessionStart && !state.viewingSessionId) {
+        document.getElementById('val-session').textContent = timeSince(state.sessionStart);
+      }
+    }, 1000);
+  }
+}
+
+// ────────────────────────────────────────────────────────────
+//  TAB SWITCHER
+// ────────────────────────────────────────────────────────────
+function switchTab(name) {
+  ['sessions','cargo','package','fsreads'].forEach(t => {
+    document.getElementById(`tab-btn-${t}`)?.classList.toggle('active', t === name);
+    document.getElementById(`tab-pane-${t}`)?.classList.toggle('active', t === name);
+  });
+  if (name === 'sessions') fetchAndRenderSessions();
+  if (name === 'package')  fetchPackageCapture(false);
+  if (name === 'fsreads')  fetchFsReads(false);
+}
+
+// ────────────────────────────────────────────────────────────
+//  SESSIONS TAB
+// ────────────────────────────────────────────────────────────
+async function fetchAndRenderSessions() {
+  const loadingEl = document.getElementById('sessions-loading');
+  const listEl    = document.getElementById('sessions-list');
+  if (loadingEl) loadingEl.textContent = 'loading…';
+  try {
+    const sessions = await fetch('/sessions').then(r => r.json());
+    renderSessionList(sessions);
+  } catch {
+    if (listEl) listEl.innerHTML = '<div style="color:var(--dim);padding:12px;font-size:10px;text-align:center">Cannot reach proxy — is it running?</div>';
+  }
+  if (loadingEl) loadingEl.textContent = '';
+}
+
+function renderSessionList(sessions) {
+  const listEl = document.getElementById('sessions-list');
+  if (!listEl) return;
+  if (!sessions.length) {
+    listEl.innerHTML = '<div style="color:var(--dim);padding:12px;font-size:10px;text-align:center">No sessions recorded yet.</div>';
+    return;
+  }
+  listEl.innerHTML = sessions.map(s => {
+    const isActive  = s.isActive;
+    const isViewing = state.viewingSessionId === s.id;
+    const badge = isActive
+      ? '<span class="session-live-badge">LIVE</span>'
+      : (isViewing ? '<span class="session-hist-badge">VIEWING</span>' : '');
+    const date = s.startTs ? new Date(s.startTs).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false}) : s.id;
+    return `
+      <div class="session-row ${isActive ? 'active-session' : ''} ${isViewing ? 'viewing' : ''}" onclick="handleSessionClick('${s.id}', ${isActive})">
+        <div class="session-row-top">
+          <span class="session-date">${date}</span>
+          ${badge}
+        </div>
+        <div class="session-row-stats">
+          <span>turns: <span>${s.turns || 0}</span></span>
+          <span>max: <span>${s.maxTokens ? ((s.maxTokens/1000).toFixed(0))+'k' : '—'}</span></span>
+          <span>${(s.model||'').replace('claude-','').slice(0,12) || '—'}</span>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function handleSessionClick(sessionId, isActive) {
+  if (isActive && !state.viewingSessionId) return; // already live
+  if (isActive && state.viewingSessionId) { returnToLive(); return; }
+  loadHistoricalSession(sessionId);
+}
+
+async function loadHistoricalSession(sessionId) {
+  state.viewingSessionId = sessionId;
+  // Show hist banner
+  const banner = document.getElementById('hist-banner');
+  const sidEl  = document.getElementById('hist-banner-sid');
+  if (banner) banner.classList.add('visible');
+  if (sidEl)  sidEl.textContent = sessionId;
+
+  // Reset turn feed
+  const feed = document.getElementById('turn-feed');
+  feed.innerHTML = '<div style="color:var(--dim);font-size:10px;padding:12px;text-align:center">Loading session…</div>';
+  state.turns = []; state.sparkHistory = []; state.cumulative = {}; state.maxPayload = 1; state.sessionStart = null;
+
+  let turns = null;
+  // Try localStorage first
+  const cached = lsGet(LS_TURN_PFX + sessionId);
+  if (cached) {
+    try { turns = JSON.parse(cached); } catch {}
+  }
+  // Fall back to server
+  if (!turns || !turns.length) {
+    try {
+      turns = await fetch(`/sessions/${encodeURIComponent(sessionId)}/turns`).then(r => r.json());
+      // Cache result
+      if (turns.length) {
+        try { lsSet(LS_TURN_PFX + sessionId, JSON.stringify(turns)); } catch {}
+      }
+    } catch {
+      feed.innerHTML = '<div style="color:var(--red);font-size:10px;padding:12px">Failed to load session — proxy may not be running.</div>';
+      return;
+    }
+  }
+
+  feed.innerHTML = '';
+  if (!turns || !turns.length) {
+    feed.innerHTML = '<div style="color:var(--dim);font-size:10px;padding:12px">No turns recorded for this session.</div>';
+    return;
+  }
+
+  // Replay turns oldest-first (they'll be inserted newest-first into feed)
+  // processTurn does feed.insertBefore(row, feed.firstChild), so replay in order
+  turns.forEach(t => {
+    // Reconstruct the SSE-broadcast shape from manifest.jsonl shape if needed
+    const d = normaliseTurnData(t);
+    processTurn(d, true);
+  });
+
+  // Update session field in header
+  if (turns[0]) {
+    const date = turns[0].ts ? new Date(turns[0].ts).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false}) : sessionId;
+    document.getElementById('val-session').textContent = date;
+  }
+
+  // Re-render sessions list to show VIEWING badge
+  fetchAndRenderSessions();
+}
+
+function normaliseTurnData(t) {
+  // manifest.jsonl entries have a slightly different shape from SSE broadcasts
+  // Patch missing fields to match what buildTurnRow expects
+  if (!t.messages && t.messages === undefined) t.messages = { total:0, byRole:{}, chars:0, tokens:0, toolUseBlocks:0, toolResultBlocks:0, toolResultByName:{}, mcpServers:[], cacheBlocks:0, textTokens:0 };
+  if (!t.tokens) t.tokens = { system:0, tools:0, messages:0, total:0, delta:0 };
+  return t;
+}
+
+function returnToLive() {
+  state.viewingSessionId = null;
+  const banner = document.getElementById('hist-banner');
+  if (banner) banner.classList.remove('visible');
+
+  // Reload from localStorage (live session)
+  const feed = document.getElementById('turn-feed');
+  feed.innerHTML = '';
+  state.turns = []; state.sparkHistory = []; state.cumulative = {}; state.maxPayload = 1; state.sessionStart = null;
+  restoreFromLocalStorage();
+  fetchAndRenderSessions();
+}
+
+// ────────────────────────────────────────────────────────────
+//  PACKAGE TAB
+// ────────────────────────────────────────────────────────────
+async function fetchPackageCapture(forceRefresh = false) {
+  const content = document.getElementById('pkg-tab-content');
+  if (!content) return;
+  // Use cache if available and not forcing refresh
+  if (!forceRefresh && state.pkgCacheLoaded && state.pkgCacheEntries !== null) {
+    renderPackageCapture(state.pkgCacheEntries);
+    return;
+  }
+  content.innerHTML = '<div class="pkg-no-data">Loading…</div>';
+  try {
+    const url = '/package-capture' + (state.sessionId ? `?session=${encodeURIComponent(state.sessionId)}` : '');
+    const entries = await fetch(url).then(r => r.json());
+    state.pkgCacheEntries = entries;
+    state.pkgCacheLoaded  = true;
+    renderPackageCapture(entries);
+  } catch {
+    content.innerHTML = '<div class="pkg-no-data">Cannot reach proxy, or no package-capture.jsonl yet.<br>Launch with <code style="color:var(--cyan)">node claude-monitor.js</code>.</div>';
+  }
+}
+
+function renderPackageCapture(entries) {
+  const content = document.getElementById('pkg-tab-content');
+  if (!content) return;
+  if (!entries.length) {
+    content.innerHTML = '<div class="pkg-no-data">No package capture data. Launch with <code style="color:var(--cyan)">node claude-monitor.js</code>.</div>';
+    return;
+  }
+
+  const starts   = entries.filter(e => e.type === 'process_start');
+  const requests = entries.filter(e => e.type === 'request');
+  const responses = entries.filter(e => e.type === 'response_stream' || e.type === 'response');
+  const errors   = entries.filter(e => e.type === 'uncaught_exception' || e.type === 'unhandled_rejection' || e.type === 'request_error');
+  const stderrs  = entries.filter(e => e.type === 'stderr');
+  const exits    = entries.filter(e => e.type === 'process_exit');
+  const bursts   = requests.filter(e => e.isBurst);
+  const compactions = responses.filter(e => e.compactionDetected);
+
+  let html = '';
+
+  // Process start section
+  if (starts.length) {
+    const s = starts[starts.length - 1]; // most recent
+    html += `<div class="pkg-section">
+      <div class="pkg-section-title">Process Start</div>
+      <div class="pkg-kv"><span class="pkg-k">Node:</span><span class="pkg-v highlight">${s.nodeVersion || '—'}</span></div>
+      <div class="pkg-kv"><span class="pkg-k">PID:</span><span class="pkg-v">${s.pid || '—'}</span></div>
+      <div class="pkg-kv"><span class="pkg-k">Time:</span><span class="pkg-v">${s.ts ? new Date(s.ts).toLocaleTimeString() : '—'}</span></div>
+      <div class="pkg-kv"><span class="pkg-k">CLI flags:</span></div>
+      ${(s.argv || []).map(a => `<div class="pkg-argv">${a.replace(/</g,'&lt;')}</div>`).join('')}
+      ${s.env ? Object.entries(s.env).filter(([,v]) => v).map(([k,v]) => `<div class="pkg-kv"><span class="pkg-k">${k}:</span><span class="pkg-v amber">${String(v).replace(/</g,'&lt;').slice(0,80)}</span></div>`).join('') : ''}
+    </div>`;
+  }
+
+  // Requests section
+  if (requests.length) {
+    html += `<div class="pkg-section">
+      <div class="pkg-section-title">API Requests <span class="count-badge">${requests.length}</span></div>
+      ${requests.slice(-20).reverse().map(r => {
+        const ws = r.wagonSummary || {};
+        const resp = responses.find(rs => rs.requestId === r.requestId);
+        const compacted = resp?.compactionDetected ? '<span class="compaction">⚡ compaction</span>' : '';
+        const burstTag  = r.isBurst ? `<span class="burst">BURST ×${r.burstCount}</span>` : '';
+        return `<div class="pkg-req-row">
+          <span class="ts">${r.ts ? new Date(r.ts).toLocaleTimeString() : ''}</span>
+          <span class="endpoint">${r.endpoint || '—'}</span>
+          <span class="model">${(ws.model||'').replace('claude-','').slice(0,14)}</span>
+          <span class="msgcount">${ws.messageCount ?? '?'} msgs</span>
+          <span class="toolcount">${ws.toolCount ?? '?'} tools</span>
+          ${burstTag}${compacted}
+        </div>`;
+      }).join('')}
+    </div>`;
+  }
+
+  // Beta headers / stainless-helper section
+  const headersFromRequests = requests.filter(r => r.wagonSummary?.betaHeader || r.wagonSummary?.stainlessHelper);
+  if (headersFromRequests.length) {
+    const sample = headersFromRequests[headersFromRequests.length - 1].wagonSummary;
+    html += `<div class="pkg-section">
+      <div class="pkg-section-title">npm Package Headers (last request)</div>
+      ${sample.betaHeader ? `<div class="pkg-kv"><span class="pkg-k">anthropic-beta:</span><span class="pkg-v amber">${sample.betaHeader}</span></div>` : ''}
+      ${sample.stainlessHelper ? `<div class="pkg-kv"><span class="pkg-k">x-stainless-helper:</span><span class="pkg-v highlight">${sample.stainlessHelper}</span></div>` : ''}
+      <div class="pkg-kv"><span class="pkg-k">cache markers:</span><span class="pkg-v">${sample.cacheMarkers ?? '—'}</span></div>
+      <div class="pkg-kv"><span class="pkg-k">max_tokens:</span><span class="pkg-v">${sample.maxTokens ?? '—'}</span></div>
+    </div>`;
+  }
+
+  // Burst detector
+  if (bursts.length) {
+    html += `<div class="pkg-section">
+      <div class="pkg-section-title">Burst Detections <span class="count-badge" style="background:rgba(255,68,68,.2);color:var(--red)">${bursts.length}</span></div>
+      ${bursts.map(b => `<div class="pkg-burst-box">BURST: ${b.endpoint} × ${b.burstCount} calls at ${b.ts ? new Date(b.ts).toLocaleTimeString() : '?'}</div>`).join('')}
+    </div>`;
+  }
+
+  // Compaction events
+  if (compactions.length) {
+    html += `<div class="pkg-section">
+      <div class="pkg-section-title">Compactions Detected <span class="count-badge" style="background:rgba(0,255,136,.15);color:var(--green)">${compactions.length}</span></div>
+      ${compactions.map(c => `<div class="pkg-compaction-box">⚡ compaction at ${c.ts ? new Date(c.ts).toLocaleTimeString() : '?'} (${c.durationMs || 0}ms)</div>`).join('')}
+    </div>`;
+  }
+
+  // Errors
+  if (errors.length) {
+    html += `<div class="pkg-section">
+      <div class="pkg-section-title">Errors <span class="count-badge" style="background:rgba(255,68,68,.2);color:var(--red)">${errors.length}</span></div>
+      ${errors.slice(-10).map(e => `<div class="pkg-error-box">
+        <div class="pkg-error-ts">${e.type} · ${e.ts ? new Date(e.ts).toLocaleTimeString() : ''}</div>
+        <div class="pkg-error-msg">${(e.error || e.reason || '').replace(/</g,'&lt;')}</div>
+        ${e.stack ? `<div class="pkg-error-stack">${e.stack.replace(/</g,'&lt;').slice(0,400)}</div>` : ''}
+      </div>`).join('')}
+    </div>`;
+  }
+
+  // Stderr warnings
+  if (stderrs.length) {
+    html += `<div class="pkg-section">
+      <div class="pkg-section-title">Bundle Warnings (stderr) <span class="count-badge">${stderrs.length}</span></div>
+      ${stderrs.slice(-5).map(e => `<div class="pkg-error-box" style="color:var(--amber);border-color:rgba(240,165,0,.3);background:rgba(240,165,0,.05)">
+        <div class="pkg-error-ts">${e.ts ? new Date(e.ts).toLocaleTimeString() : ''}</div>
+        <div class="pkg-error-msg">${(e.text||'').replace(/</g,'&lt;').slice(0,300)}</div>
+      </div>`).join('')}
+    </div>`;
+  }
+
+  // Exit log
+  if (exits.length) {
+    html += `<div class="pkg-section">
+      <div class="pkg-section-title">Session Exits</div>
+      ${exits.map(e => `<div class="pkg-kv"><span class="pkg-k">${e.ts ? new Date(e.ts).toLocaleTimeString() : ''}</span><span class="pkg-v ${e.exitCode === 0 ? 'green' : 'red'}">exit ${e.exitCode} (${((e.durationMs||0)/1000).toFixed(0)}s)</span></div>`).join('')}
+    </div>`;
+  }
+
+  content.innerHTML = html || '<div class="pkg-no-data">No data yet.</div>';
+}
+
+// ────────────────────────────────────────────────────────────
+//  FS READS TAB
+// ────────────────────────────────────────────────────────────
+const CAT_COLORS = {
+  commands:    '#e5c07b',
+  agents:      '#c678dd',
+  skills:      '#c678dd',
+  plugin_json: '#56b6c2',
+  memory:      '#98c379',
+  settings:    '#61afef',
+  summary:     '#61afef',
+  claude_md:   '#e06c75',
+  changelog:   '#5c6370',
+  other:       '#4b5263',
+};
+
+async function fetchFsReads(forceRefresh = false) {
+  const content = document.getElementById('fsreads-content');
+  if (!content) return;
+  try {
+    const res = await fetch('/fs-reads/analyze');
+    if (!res.ok) { content.innerHTML = `<div style="color:var(--red);font-size:10px;padding:12px">Error: ${res.status}</div>`; return; }
+    const { data } = await res.json();
+    if (!data || data.length === 0) {
+      content.innerHTML = '<div style="color:var(--dim);font-size:10px;padding:12px;text-align:center">No fs-reads data yet. Launch via start.bat.</div>';
+      return;
+    }
+    // Render newest turn first
+    const turns = [...data].reverse();
+    content.innerHTML = turns.map(t => {
+      const catBars = Object.entries(t.byCategory)
+        .sort((a,b) => b[1].bytes - a[1].bytes)
+        .map(([cat, v]) => {
+          const pct = t.totalBytes > 0 ? (v.bytes / t.totalBytes * 100).toFixed(0) : 0;
+          const color = CAT_COLORS[cat] || '#4b5263';
+          const isInjected = ['commands','agents','skills','claude_md','memory','summary'].includes(cat);
+          return `<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">
+            <span style="width:80px;font-size:9px;color:${isInjected ? '#e5c07b' : 'var(--dim)'};flex-shrink:0">${cat}</span>
+            <div style="flex:1;height:4px;background:var(--border);border-radius:2px;overflow:hidden">
+              <div style="height:100%;width:${pct}%;background:${color};border-radius:2px"></div>
+            </div>
+            <span style="font-size:9px;color:var(--dim);min-width:70px;text-align:right">~${v.estTok} tok · ${v.count}f</span>
+          </div>`;
+        }).join('');
+
+      const ts = t.ts ? new Date(t.ts).toLocaleTimeString() : '';
+      return `<div style="border:1px solid var(--border);border-radius:3px;margin-bottom:8px;overflow:hidden">
+        <div style="display:flex;align-items:center;gap:8px;padding:4px 8px;background:var(--surface2,var(--border));font-size:9px">
+          <span style="color:var(--cyan);font-weight:700">Turn ${t.turnIdx + 1}</span>
+          <span style="color:var(--dim)">${ts}</span>
+          <span style="color:var(--text);margin-left:auto">${t.totalReads} reads · ~${t.totalEstTok} tok total</span>
+          ${t.systemPromptEstTok > 0 ? `<span style="color:var(--amber)">~${t.systemPromptEstTok} tok → system prompt</span>` : ''}
+        </div>
+        <div style="padding:6px 8px">${catBars || '<span style="color:var(--dim);font-size:9px">no tracked reads</span>'}</div>
+      </div>`;
+    }).join('');
+  } catch(e) {
+    content.innerHTML = `<div style="color:var(--red);font-size:10px;padding:12px">Failed: ${e.message}</div>`;
+  }
+}
+
+// ────────────────────────────────────────────────────────────
+//  WAGON MODAL (full per-message inventory)
+// ────────────────────────────────────────────────────────────
+async function openWagonModal(evt, turn, sessionId) {
+  evt.stopPropagation();
+  // Reuse the sys-modal
+  const backdrop = document.getElementById('sys-modal-backdrop');
+  const subtitle = document.getElementById('sys-modal-subtitle');
+  const body     = document.getElementById('sys-modal-body');
+  subtitle.textContent = `Turn ${turn} · wagon.jsonl`;
+  body.innerHTML = 'Loading…';
+  backdrop.classList.add('open');
+
+  try {
+    const sid = sessionId || state.sessionId || '';
+    const url = `/wagon?turn=${turn}${sid ? '&session='+encodeURIComponent(sid) : ''}`;
+    const data = await fetch(url).then(async r => {
+      if (!r.ok) { const t = await r.text(); throw new Error(t); }
+      return r.json();
+    });
+    body.innerHTML = renderWagonInventory(data);
+  } catch (err) {
+    body.innerHTML = `<div style="color:var(--red);padding:12px">${(err.message||String(err)).replace(/</g,'&lt;')}</div>`;
+  }
+}
+
+function renderWagonInventory(data) {
+  if (!data || !data.inventory) return '<div style="color:var(--dim)">No inventory data.</div>';
+  const { inventory, delta, npmCommands } = data;
+  let html = `<div style="font-size:10px;color:var(--dim);margin-bottom:10px">
+    Session: <span style="color:var(--text)">${data.sessionId}</span> · Turn: <span style="color:var(--amber)">${data.turn}</span> ·
+    Δ +${delta?.newMsgCount||0} msgs · +${delta?.newTokens||0} tokens this turn
+  </div>`;
+
+  if (npmCommands?.length) {
+    html += `<div style="margin-bottom:10px">${npmCommands.map(c => `<div class="npm-flag-box"><span class="npm-flag-label">npm/pkg cmd [msg ${c.msgIdx}]</span>${(c.command||'').replace(/</g,'&lt;')}</div>`).join('')}</div>`;
+  }
+
+  const maxTok = Math.max(...inventory.map(m => m.tokens), 1);
+  html += inventory.map(m => {
+    const pct     = (m.tokens / maxTok * 100).toFixed(1);
+    const isNew   = delta && m.idx >= delta.prevMsgCount;
+    const newTag  = isNew ? '<span style="color:var(--green);font-size:9px;margin-left:5px">NEW</span>' : '';
+    const blocks  = (m.blocks || []).map(b => {
+      const npmTag = b.npmFlag ? ' <span style="color:var(--amber);font-size:9px">⚠npm</span>' : '';
+      const cache  = b.cacheControl ? ` <span style="color:var(--green);font-size:9px">[${b.cacheControl}]</span>` : '';
+      const tn     = b.toolName ? ` · ${b.toolName.length > 24 ? b.toolName.slice(0,22)+'…' : b.toolName}` : '';
+      return `<span style="color:var(--dim);font-size:9px">${b.type}${tn}</span> <span style="color:var(--cyan);font-size:9px">${b.tokens}tok</span>${cache}${npmTag}`;
+    }).join(' &nbsp;·&nbsp; ');
+    return `<div style="border:1px solid var(--border);border-radius:2px;margin-bottom:4px;padding:5px 8px;${isNew?'border-color:rgba(0,255,136,.3);background:rgba(0,255,136,.03)':''}">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">
+        <span style="color:var(--dim);font-size:9px;min-width:24px">[${m.idx}]</span>
+        <span style="color:var(--amber);font-size:10px;min-width:55px">${m.role}</span>
+        <div style="flex:1;height:5px;background:var(--border);border-radius:1px;overflow:hidden"><div style="height:100%;width:${pct}%;background:var(--cyan);border-radius:1px"></div></div>
+        <span style="color:var(--cyan);font-size:10px;min-width:52px;text-align:right">${m.tokens} tok</span>
+        ${newTag}
+      </div>
+      <div style="padding-left:32px">${blocks}</div>
+    </div>`;
+  }).join('');
+  return html;
+}
+
+// ────────────────────────────────────────────────────────────
+//  SSE
+// ────────────────────────────────────────────────────────────
+let sse = null;
+let reconnectTimer = null;
+
+function connect() {
+  if (sse) { sse.close(); sse = null; }
+  sse = new EventSource('/events');
+
+  sse.addEventListener('connected', () => {
+    setConnected(true);
+    clearTimeout(reconnectTimer);
+    // Load current config from proxy
+    fetch('/config').then(r => r.json()).then(cfg => {
+      applyStripState(cfg);
+    }).catch(() => {});
+    // Populate sessions tab
+    fetchAndRenderSessions();
+  });
+
+  sse.addEventListener('turn', e => {
+    // Only process live turns when not viewing historical session
+    if (state.viewingSessionId) return;
+    try {
+      const d = JSON.parse(e.data);
+      processTurn(d);
+    } catch (err) {
+      console.error('Parse error:', err);
+    }
+  });
+
+  sse.addEventListener('heartbeat', () => {
+    // still alive — no action needed
+  });
+
+  sse.addEventListener('config', e => {
+    try { applyStripState(JSON.parse(e.data)); } catch {}
+  });
+
+  sse.addEventListener('strip', e => {
+    try { updateStripSaved(JSON.parse(e.data)); } catch {}
+  });
+
+  sse.onerror = () => {
+    setConnected(false);
+    sse.close(); sse = null;
+    reconnectTimer = setTimeout(connect, 3000);
+  };
+}
+
+// ────────────────────────────────────────────────────────────
+//  INIT
+// ────────────────────────────────────────────────────────────
+restoreFromLocalStorage();   // 1. Instant restore from localStorage (no flicker)
+connect();                   // 2. SSE live connection
+drawSparkline(state.sparkHistory);  // 3. Draw with any restored history
+// fetchAndRenderSessions called on SSE 'connected' and tab click
+</script>
+</body>
+</html>
