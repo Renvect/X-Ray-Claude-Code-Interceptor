@@ -50,7 +50,14 @@ WILL FAIL and throw a connection refused error if `start.bat` (and effectively `
 
 ## 📊 Sample Logs
 
-The included `Logs/` directory contains JSON exports from recent live testing sessions (such as today's). These logs represent the direct output of the proxy's real-time analysis detailing exactly how the system prompt shifts, where heavy tool payloads execute, and what inflates the context window.
+**Where are active logs stored?**
+The proxy natively records live active sessions as `.jsonl` (JSON Lines) tracking files (`manifest.jsonl`, `session.jsonl`, `wagon.jsonl`, etc.). These files are generated and stored directly in the main root folder, `X-Ray-Claude-Code-Interceptor`. 
+
+The included `Logs/` directory contains standard `.json` format exports from recent live testing sessions (such as today's). These logs represent the direct output of the proxy's real-time analysis detailing exactly how the system prompt shifts, where heavy tool payloads execute, and what inflates the context window.
+
+**How to view logs in the dashboard:**
+The live X-RAY dashboard (`http://localhost:3579`) automatically reads from the active `.jsonl` files.
+If you have exterior or exported logs (like the sample ones provided in the `Logs/` directory), simply drop them into the **root project directory**. The system scripts will automatically detect, restore, and load them so they become immediately viewable in your dashboard!
 
 ## 🤝 Open Source & Contributing
 
