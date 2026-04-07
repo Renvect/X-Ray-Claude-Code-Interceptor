@@ -47,3 +47,13 @@ WILL FAIL and throw a connection refused error if `start.bat` (and effectively `
 - `proxy.js` - The backend interception engine. It receives Anthropic API calls, performs payload analysis (and optional smart stripping), logs them via `.jsonl`, and broadcasts metrics to the dashboard via Server-Sent Events (SSE).
 - `claude-monitor.js` - A wrapper launcher around the actual Claude executable to guarantee environment setup and Node module preload configurations are locked in.
 - `dashboard.html` - The frontend interface connecting to the proxy on port `3579` to visualize real-time tokens, spikes, payload contents, and system instructions.
+
+## 📊 Sample Logs
+
+The included `Logs/` directory contains JSON exports from recent live testing sessions (such as today's). These logs represent the direct output of the proxy's real-time analysis detailing exactly how the system prompt shifts, where heavy tool payloads execute, and what inflates the context window.
+
+## 🤝 Open Source & Contributing
+
+We believe that debugging these black-box AI tools benefits the entire developer community! 
+
+This repository is completely open-source. **Anyone is free to use it, develop upon it, and contribute back.** If you find a new bug, come up with better stripping heuristics, or want to enhance the dashboard—pull requests and forks are highly encouraged!
