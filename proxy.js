@@ -59,6 +59,7 @@ const session = {
   prevMsgCount:     0,     // messages array length from previous turn
   // Strip tracking
   stripHistory:     [],    // { turn, beforeTokens, afterTokens, savedTokens, count, ts }
+  prevStripCeiling: -1,    // highest msg index that was stripped last turn (-1 = none)
   // Block analysis tracking
   blocksHistory:    [],    // { turn, ts, analysis } — per-turn block-level breakdown
   // Section diff tracking — Map<header, { chars, tokens }> from previous turn
@@ -690,30 +691,107 @@ function printObservation(turn, bodyBytes, parsed, msgStats, sysStats, toolsStat
   console.log(`╚${'═'.repeat(56)}`);
 }
 
-// ─── Smart Stripping ─────────────────────────────────────────────────────────
+// ─── Smart Stripping (cache-aware) ───────────────────────────────────────────
+//
+// Anthropic's prompt caching uses prefix matching up to cache_control breakpoints.
+// If we modify content within a cached prefix, the cache is invalidated.
+//
+// Strategy:
+//   1. Find cache_control breakpoints in the messages array.
+//   2. Never strip messages within the cached prefix (before the last breakpoint)
+//      UNLESS they were already stripped on the previous turn (same output = cache safe).
+//   3. Track prevStripCeiling so we never strip a message that was sent unstripped
+//      on the previous turn — that would invalidate the cached prefix.
+//
+// The strip ceiling advances by at most the number of new messages per turn,
+// ensuring only fresh (uncached) messages transition into the strip zone.
 
 // Per-tool strip thresholds for tool_result blocks.
-// after: strip when message is older than (total - keepLast - after) from end
-//        0 = use keepLast boundary; positive = extra buffer beyond keepLast
 // minChars: only strip if content exceeds this char count
 const STRIP_THRESHOLDS = {
-  ExitPlanMode: { after: 2,  minChars: 0   },
-  Write:        { after: 2,  minChars: 0   },
-  Read:         { after: 0,  minChars: 1200 }, // ~300 tok
-  Grep:         { after: 0,  minChars: 800  }, // ~200 tok
-  Glob:         { after: 0,  minChars: 800  },
-  Agent:        { after: 0,  minChars: 0   },
-  Bash:         { after: 4,  minChars: 2000 }, // ~500 tok, extra buffer
+  ExitPlanMode: { minChars: 0    },
+  Write:        { minChars: 0    },
+  Read:         { minChars: 1200 }, // ~300 tok
+  Grep:         { minChars: 800  }, // ~200 tok
+  Glob:         { minChars: 800  },
+  Agent:        { minChars: 0    },
+  Bash:         { minChars: 2000 }, // ~500 tok
 };
 
-function smartStrip(messages, cfg, toolIdMap) {
+/**
+ * Find indices of messages that contain at least one cache_control block.
+ */
+function findCacheBreakpoints(messages) {
+  const indices = [];
+  for (let i = 0; i < messages.length; i++) {
+    if (!Array.isArray(messages[i].content)) continue;
+    for (const block of messages[i].content) {
+      if (block.cache_control) { indices.push(i); break; }
+    }
+  }
+  return indices;
+}
+
+/**
+ * Compute the cache-safe strip ceiling: the highest message index we're
+ * allowed to strip without invalidating Anthropic's prompt cache.
+ *
+ * Rules:
+ *   - Never strip at or past the LAST cache breakpoint (that's the hot prefix).
+ *   - Never strip past prevStripCeiling + newMsgCount. Messages between the
+ *     old ceiling and the new one were sent unstripped last turn; stripping
+ *     them now would break the cache for the segment they're in. We allow
+ *     advancing by newMsgCount because those slots correspond to the new
+ *     user+assistant messages appended this turn — they shift old messages
+ *     out of the "keepLast" window.
+ *   - On the first turn with stripping enabled (prevStripCeiling == -1),
+ *     use the cache-based boundary. This may cause a one-time cache miss
+ *     on the messages segment; subsequent turns will cache the stripped forms.
+ */
+function computeStripCeiling(messages, cfg, prevStripCeiling, prevMsgCount) {
+  const total = messages.length;
+  const cacheBps = findCacheBreakpoints(messages);
+
+  // Default ceiling from keepLast config
+  const keepLastCeiling = Math.max(0, total - cfg.stripKeepLast);
+
+  // Cache-based ceiling: don't touch anything at or past the last breakpoint
+  const lastBp = cacheBps.length > 0 ? cacheBps[cacheBps.length - 1] : total;
+  const cacheCeiling = Math.min(keepLastCeiling, lastBp);
+
+  if (prevStripCeiling < 0) {
+    // First turn with stripping — accept a one-time partial cache miss.
+    // The stripped content becomes the new cached prefix for future turns.
+    return cacheCeiling;
+  }
+
+  // How many new messages were added since last turn
+  const newMsgs = Math.max(0, total - prevMsgCount);
+
+  // Allow the ceiling to advance by at most newMsgs positions.
+  // This means only messages that are "newly old" (just pushed out of
+  // keepLast by new arrivals) get stripped — they were at the EDGE of
+  // the protected zone last turn and are now past the last cache BP
+  // (which also moved forward by ~newMsgs).
+  const advancedCeiling = prevStripCeiling + newMsgs;
+
+  // Take the most conservative of all ceilings
+  return Math.min(cacheCeiling, advancedCeiling);
+}
+
+function smartStrip(messages, cfg, toolIdMap, prevMsgCount) {
   const total   = messages.length;
-  const keepFrom = Math.max(0, total - cfg.stripKeepLast);
-  const stats   = { images: 0, thinking: 0, toolResults: 0, writeContent: 0, savedChars: 0 };
+  const stripCeiling = computeStripCeiling(messages, cfg, session.prevStripCeiling, prevMsgCount);
+  const stats   = { images: 0, thinking: 0, toolResults: 0, writeContent: 0, savedChars: 0,
+                    stripCeiling, cacheBreakpoints: findCacheBreakpoints(messages).length };
 
   const result = messages.map((msg, i) => {
     if (!Array.isArray(msg.content)) return msg;
-    const age = total - i; // messages from the end (1 = most recent)
+
+    // Messages at or past the ceiling are protected (in cached prefix or keepLast)
+    if (i >= stripCeiling) return msg;
+
+    const age = total - i;
 
     const newContent = msg.content.map(block => {
 
@@ -723,11 +801,11 @@ function smartStrip(messages, cfg, toolIdMap) {
         if (chars === 0) return block;
         stats.images++;
         stats.savedChars += chars;
-        return { type: 'text', text: `[image ~${est(chars)} tok stripped after ${age} turns — re-share if needed]` };
+        return { type: 'text', text: `[image ~${est(chars)} tok stripped — re-share if needed]` };
       }
 
       // ── Thinking blocks ───────────────────────────────────────────────────
-      if (block.type === 'thinking' && cfg.stripThinking && age > 2) {
+      if (block.type === 'thinking' && cfg.stripThinking) {
         const chars = contentLength(block.thinking);
         if (chars === 0) return block;
         stats.thinking++;
@@ -736,7 +814,7 @@ function smartStrip(messages, cfg, toolIdMap) {
       }
 
       // ── tool_use/Write — strip file body, keep path ───────────────────────
-      if (block.type === 'tool_use' && block.name === 'Write' && age > 2) {
+      if (block.type === 'tool_use' && block.name === 'Write') {
         const chars = contentLength(block.input?.content);
         if (chars === 0) return block;
         stats.writeContent++;
@@ -749,8 +827,6 @@ function smartStrip(messages, cfg, toolIdMap) {
         const toolName  = (toolIdMap && toolIdMap[block.tool_use_id]) || 'unknown';
         const threshold = STRIP_THRESHOLDS[toolName];
         if (!threshold) return block;
-        const stripBefore = keepFrom - threshold.after; // strip msgs older than this index
-        if (i >= stripBefore) return block;             // within protected window
         const chars = contentLength(block.content);
         if (chars <= threshold.minChars) return block;
         stats.toolResults++;
@@ -764,12 +840,15 @@ function smartStrip(messages, cfg, toolIdMap) {
     return { ...msg, content: newContent };
   });
 
+  // Update session tracking — the ceiling we ACTUALLY used
+  session.prevStripCeiling = stripCeiling;
+
   return { messages: result, stats, savedTokens: est(stats.savedChars) };
 }
 
 // Legacy wrapper kept for backward compat
 function stripMessages(messages, keepLast) {
-  const r = smartStrip(messages, { ...config, stripKeepLast: keepLast, stripImages: false, stripThinking: false }, {});
+  const r = smartStrip(messages, { ...config, stripKeepLast: keepLast, stripImages: false, stripThinking: false }, {}, 0);
   return { messages: r.messages, stripped: r.stats.toolResults, savedChars: r.stats.savedChars, savedTokens: r.savedTokens };
 }
 
@@ -1079,7 +1158,7 @@ function observeAndPassthrough(clientReq, clientRes, rawBody) {
   // ── Strip or passthrough ──
   if (config.stripping) {
     const beforeTokens = est(Buffer.byteLength(rawBody, 'utf8'));
-    const { messages: stripped, stats, savedTokens } = smartStrip(parsed.messages, config, toolIdMap);
+    const { messages: stripped, stats, savedTokens } = smartStrip(parsed.messages, config, toolIdMap, session.prevMsgCount);
     const totalStripped = stats.images + stats.thinking + stats.toolResults + stats.writeContent;
     if (totalStripped > 0) {
       const modifiedBody = JSON.stringify({ ...parsed, messages: stripped });
@@ -1089,6 +1168,8 @@ function observeAndPassthrough(clientReq, clientRes, rawBody) {
         count: totalStripped,
         images: stats.images, thinking: stats.thinking,
         toolResults: stats.toolResults, writeContent: stats.writeContent,
+        stripCeiling: stats.stripCeiling,
+        cacheBreakpoints: stats.cacheBreakpoints,
         ts: new Date().toISOString(),
       };
       session.stripHistory.push(stripEntry);
@@ -1098,7 +1179,7 @@ function observeAndPassthrough(clientReq, clientRes, rawBody) {
         stats.toolResults && `${stats.toolResults} tool_result`,
         stats.writeContent && `${stats.writeContent} write`,
       ].filter(Boolean).join(', ');
-      console.log(`║  [STRIP] ${parts}  saved ~${fmt(savedTokens)} tok  (${fmt(beforeTokens)} → ${fmt(afterTokens)} tok)`);
+      console.log(`║  [STRIP] ${parts}  saved ~${fmt(savedTokens)} tok  (${fmt(beforeTokens)} → ${fmt(afterTokens)} tok)  ceiling=${stats.stripCeiling} cacheBPs=${stats.cacheBreakpoints}`);
       broadcast('strip', stripEntry);
       return forward(clientReq, clientRes, modifiedBody);
     }
